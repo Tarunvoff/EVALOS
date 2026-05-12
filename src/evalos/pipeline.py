@@ -44,7 +44,11 @@ class Pipeline:
         retry: RetryConfig | None = None,
         eval_model: str | None = None,
         criteria_model: str | None = None,
+        generation_model: str | None = None,
+        repair_model: str | None = None,
         profile: str = "general",
+        evaluation_strictness: str = "balanced",
+        strict_mode: bool = False,
         provider_instance: BaseProvider | None = None,
     ) -> None:
         self._config = PipelineConfig(
@@ -56,7 +60,11 @@ class Pipeline:
             retry=retry or RetryConfig(),
             eval_model=eval_model,
             criteria_model=criteria_model,
+            generation_model=generation_model,
+            repair_model=repair_model,
             profile=profile,
+            evaluation_strictness=evaluation_strictness,
+            strict_mode=strict_mode,
         )
         base_provider = provider_instance or ProviderRegistry.get(provider)
         self._provider = ResilientProvider(
@@ -76,7 +84,7 @@ class Pipeline:
         retry_total += self._provider.last_attempts - 1
 
         response = await self._provider.generate(
-            model=self._config.model, messages=self._messages(query)
+            model=self._generation_model(), messages=self._messages(query)
         )
         retry_total += self._provider.last_attempts - 1
         text, usage = _extract_text_and_usage(response)
@@ -96,7 +104,7 @@ class Pipeline:
             if self._config.repair_strategy != "selective":
                 break
 
-            repaired, deltas, strategies, failed_sections = await self._repair.repair(
+            repaired, deltas, strategies, failed_sections, repair_tokens = await self._repair.repair(
                 query=query,
                 response_text=current_text,
                 evaluation=current_eval,
@@ -113,6 +121,8 @@ class Pipeline:
                     failed_sections=failed_sections,
                     score_before=current_eval.weighted_score,
                     deltas=deltas,
+                    repair_tokens=repair_tokens,
+                    token_delta=repair_tokens,
                 )
             )
             current_text = repaired
@@ -124,11 +134,25 @@ class Pipeline:
             retry_total += self._provider.last_attempts - 1
             repairs[-1] = repairs[-1].model_copy(update={"score_after": current_eval.weighted_score})
 
+            self._logger.info(
+                "repair_applied",
+                attempt=attempt,
+                failed_criteria=repairs[-1].failed_criteria,
+                strategies=repairs[-1].strategies,
+                affected_sections=repairs[-1].failed_sections,
+                score_before=repairs[-1].score_before,
+                score_after=repairs[-1].score_after,
+                token_delta=repairs[-1].token_delta,
+            )
+
         latency_ms = (time.perf_counter() - start) * 1000.0
         quality_after = current_eval.weighted_score if current_eval else 0.0
         repair_gain = quality_after - quality_before
         repair_efficiency = repair_gain / max(1, len(repairs))
         token_efficiency = repair_gain / max(1, usage.total_tokens)
+        repair_token_cost = sum(record.repair_tokens for record in repairs)
+        estimated_full_retry_tokens = usage.total_tokens * len(repairs)
+        tokens_saved_vs_retry = max(0.0, estimated_full_retry_tokens - repair_token_cost)
         metrics = Metrics(
             provider=self._config.provider,
             model=self._config.model,
@@ -146,6 +170,10 @@ class Pipeline:
             criteria_pass_rate=current_eval.pass_rate if current_eval else 0.0,
             weighted_quality_score=quality_after,
             repair_lineage=repairs,
+            tokens_saved_vs_retry=tokens_saved_vs_retry,
+            estimated_full_retry_tokens=estimated_full_retry_tokens,
+            repair_token_cost=repair_token_cost,
+            improvement_delta=repair_gain,
         )
 
         self._logger.info(
@@ -170,7 +198,9 @@ class Pipeline:
     ) -> AsyncIterator[StreamEvent]:
         criteria = await self._criteria.generate(query=query, optimize_for=optimize_for)
 
-        stream = self._provider.stream(model=self._config.model, messages=self._messages(query))
+        stream = self._provider.stream(
+            model=self._generation_model(), messages=self._messages(query)
+        )
         buffer: list[str] = []
 
         async for event in stream:
@@ -219,6 +249,9 @@ class Pipeline:
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": query},
         ]
+
+    def _generation_model(self) -> str:
+        return self._config.generation_model or self._config.model
 
 def _extract_text_and_usage(response: dict) -> tuple[str, Usage]:
     try:

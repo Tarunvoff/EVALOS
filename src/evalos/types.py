@@ -50,6 +50,7 @@ class CriterionResult(BaseModel):
     rationale: str | None = None
     weight: float = 1.0
     severity: Severity = "medium"
+    threshold: float = 0.7
     confidence: float = Field(default=0.8, ge=0.0, le=1.0)
     reason: str | None = None
     affected_section: str | None = None
@@ -101,6 +102,10 @@ class Metrics(BaseModel):
     criteria_pass_rate: float = 0.0
     weighted_quality_score: float = 0.0
     repair_lineage: list["RepairRecord"] = Field(default_factory=list)
+    tokens_saved_vs_retry: float = 0.0
+    estimated_full_retry_tokens: float = 0.0
+    repair_token_cost: float = 0.0
+    improvement_delta: float = 0.0
 
 
 class RepairDelta(BaseModel):
@@ -119,6 +124,8 @@ class RepairRecord(BaseModel):
     score_before: float | None = None
     score_after: float | None = None
     deltas: list[RepairDelta] = Field(default_factory=list)
+    repair_tokens: int = 0
+    token_delta: int = 0
 
 
 class GenerationResponse(BaseModel):

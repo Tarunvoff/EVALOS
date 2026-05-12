@@ -38,6 +38,8 @@ class CriteriaGenerator:
             "query": query,
             "optimize_for": optimize_for,
             "quality_profile": self._config.profile,
+            "evaluation_strictness": self._config.evaluation_strictness,
+            "strict_mode": self._config.strict_mode,
             "output_format": "JSON array of {name, description, weight, threshold, severity}",
         }
         return (

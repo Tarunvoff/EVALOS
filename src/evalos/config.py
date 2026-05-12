@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -20,3 +22,7 @@ class PipelineConfig(BaseModel):
     eval_model: str | None = None
     criteria_model: str | None = None
     profile: str = "general"
+    evaluation_strictness: Literal["relaxed", "balanced", "strict", "adversarial"] = "balanced"
+    strict_mode: bool = False
+    generation_model: str | None = None
+    repair_model: str | None = None

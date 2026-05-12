@@ -32,7 +32,7 @@ class RepairEngine:
         evaluation: EvaluationResult,
         criteria: list[Criterion],
         sections: list[Section],
-    ) -> tuple[str, list[RepairDelta], list[str], list[str]]:
+    ) -> tuple[str, list[RepairDelta], list[str], list[str], int]:
         failed = evaluation.failed
         prompt = self._build_prompt(query, response_text, failed, criteria, sections, evaluation)
         messages = [
@@ -41,14 +41,19 @@ class RepairEngine:
         ]
 
         try:
-            response = await self._provider.generate(model=self._config.model, messages=messages)
+            response = await self._provider.generate(
+                model=self._config.repair_model or self._config.model,
+                messages=messages,
+            )
             content = response["choices"][0]["message"]["content"]
+            usage = response.get("usage") or {}
+            repair_tokens = int(usage.get("total_tokens", 0))
             payload = extract_json(content)
             deltas = _normalize_deltas(payload)
             repaired = _apply_deltas(sections, deltas)
             strategies = [delta.strategy for delta in deltas]
             failed_sections = sorted({delta.section_id for delta in deltas})
-            return repaired, deltas, strategies, failed_sections
+            return repaired, deltas, strategies, failed_sections, repair_tokens
         except Exception as exc:
             raise RepairError("Repair failed") from exc
 
