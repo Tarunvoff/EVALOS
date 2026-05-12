@@ -44,6 +44,7 @@ class Pipeline:
         retry: RetryConfig | None = None,
         eval_model: str | None = None,
         criteria_model: str | None = None,
+        profile: str = "general",
         provider_instance: BaseProvider | None = None,
     ) -> None:
         self._config = PipelineConfig(
@@ -55,6 +56,7 @@ class Pipeline:
             retry=retry or RetryConfig(),
             eval_model=eval_model,
             criteria_model=criteria_model,
+            profile=profile,
         )
         base_provider = provider_instance or ProviderRegistry.get(provider)
         self._provider = ResilientProvider(
@@ -82,6 +84,7 @@ class Pipeline:
             query=query, response_text=text, criteria=criteria
         )
         retry_total += self._provider.last_attempts - 1
+        quality_before = evaluation.weighted_score
 
         repairs: list[RepairRecord] = []
         current_text = text
@@ -93,11 +96,12 @@ class Pipeline:
             if self._config.repair_strategy != "selective":
                 break
 
-            repaired = await self._repair.repair(
+            repaired, deltas, strategies, failed_sections = await self._repair.repair(
                 query=query,
                 response_text=current_text,
-                failed=current_eval.failed,
+                evaluation=current_eval,
                 criteria=criteria,
+                sections=current_eval.sections,
             )
             retry_total += self._provider.last_attempts - 1
             repairs.append(
@@ -105,6 +109,10 @@ class Pipeline:
                     attempt=attempt,
                     failed_criteria=current_eval.failed,
                     repaired_text=repaired,
+                    strategies=strategies,
+                    failed_sections=failed_sections,
+                    score_before=current_eval.weighted_score,
+                    deltas=deltas,
                 )
             )
             current_text = repaired
@@ -114,8 +122,13 @@ class Pipeline:
                 criteria=criteria,
             )
             retry_total += self._provider.last_attempts - 1
+            repairs[-1] = repairs[-1].model_copy(update={"score_after": current_eval.weighted_score})
 
         latency_ms = (time.perf_counter() - start) * 1000.0
+        quality_after = current_eval.weighted_score if current_eval else 0.0
+        repair_gain = quality_after - quality_before
+        repair_efficiency = repair_gain / max(1, len(repairs))
+        token_efficiency = repair_gain / max(1, usage.total_tokens)
         metrics = Metrics(
             provider=self._config.provider,
             model=self._config.model,
@@ -125,6 +138,14 @@ class Pipeline:
             usage=usage,
             criteria_count=len(criteria),
             failed_criteria_count=len(current_eval.failed) if current_eval else 0,
+            quality_before=quality_before,
+            quality_after=quality_after,
+            repair_gain=repair_gain,
+            repair_efficiency=repair_efficiency,
+            token_efficiency=token_efficiency,
+            criteria_pass_rate=current_eval.pass_rate if current_eval else 0.0,
+            weighted_quality_score=quality_after,
+            repair_lineage=repairs,
         )
 
         self._logger.info(
@@ -174,6 +195,10 @@ class Pipeline:
             usage=Usage(),
             criteria_count=len(criteria),
             failed_criteria_count=len(evaluation.failed),
+            quality_before=evaluation.weighted_score,
+            quality_after=evaluation.weighted_score,
+            criteria_pass_rate=evaluation.pass_rate,
+            weighted_quality_score=evaluation.weighted_score,
         )
 
         yield StreamEvent(type="evaluation", data=evaluation)

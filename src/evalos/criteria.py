@@ -37,10 +37,11 @@ class CriteriaGenerator:
         payload = {
             "query": query,
             "optimize_for": optimize_for,
-            "output_format": "JSON array of {name, description, weight, threshold}",
+            "quality_profile": self._config.profile,
+            "output_format": "JSON array of {name, description, weight, threshold, severity}",
         }
         return (
-            "Generate 3-6 evaluation criteria tailored to the query and goals. "
+            "Generate 3-6 evaluation criteria tailored to the query, goals, and profile. "
             "Each criterion must be actionable and measurable. "
             "Return ONLY JSON.\n\n"
             f"{json.dumps(payload, ensure_ascii=True)}"

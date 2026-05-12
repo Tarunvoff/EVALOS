@@ -19,3 +19,4 @@ class PipelineConfig(BaseModel):
     retry: RetryConfig = Field(default_factory=RetryConfig)
     eval_model: str | None = None
     criteria_model: str | None = None
+    profile: str = "general"

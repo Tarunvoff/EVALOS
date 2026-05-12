@@ -2,26 +2,39 @@ from __future__ import annotations
 
 import json
 
+from pydantic import TypeAdapter
+
 from evalos.config import PipelineConfig
 from evalos.errors import RepairError
 from evalos.providers.base import BaseProvider
-from evalos.types import Criterion
+from evalos.types import Criterion, EvaluationResult, RepairDelta, Section
+from evalos.utils import extract_json
 
 
 class RepairEngine:
     def __init__(self, provider: BaseProvider, config: PipelineConfig) -> None:
         self._provider = provider
         self._config = config
+        self._strategy_map = {
+            "clarity": "simplify wording and structure",
+            "factuality": "verify claims and correct inaccuracies",
+            "accuracy": "verify claims and correct inaccuracies",
+            "depth": "expand technical reasoning and details",
+            "completeness": "fill missing gaps and cover required points",
+            "coherence": "improve transitions and logical flow",
+        }
 
     async def repair(
         self,
         *,
         query: str,
         response_text: str,
-        failed: list[str],
+        evaluation: EvaluationResult,
         criteria: list[Criterion],
-    ) -> str:
-        prompt = self._build_prompt(query, response_text, failed, criteria)
+        sections: list[Section],
+    ) -> tuple[str, list[RepairDelta], list[str], list[str]]:
+        failed = evaluation.failed
+        prompt = self._build_prompt(query, response_text, failed, criteria, sections, evaluation)
         messages = [
             {"role": "system", "content": "You repair only failed criteria."},
             {"role": "user", "content": prompt},
@@ -29,7 +42,13 @@ class RepairEngine:
 
         try:
             response = await self._provider.generate(model=self._config.model, messages=messages)
-            return response["choices"][0]["message"]["content"]
+            content = response["choices"][0]["message"]["content"]
+            payload = extract_json(content)
+            deltas = _normalize_deltas(payload)
+            repaired = _apply_deltas(sections, deltas)
+            strategies = [delta.strategy for delta in deltas]
+            failed_sections = sorted({delta.section_id for delta in deltas})
+            return repaired, deltas, strategies, failed_sections
         except Exception as exc:
             raise RepairError("Repair failed") from exc
 
@@ -39,17 +58,66 @@ class RepairEngine:
         response_text: str,
         failed: list[str],
         criteria: list[Criterion],
+        sections: list[Section],
+        evaluation: EvaluationResult,
     ) -> str:
+        instructions = []
+        for result in evaluation.results:
+            if not result.passed:
+                strategy = result.suggested_strategy or self._strategy_for(result.name)
+                instructions.append(
+                    {
+                        "criterion": result.name,
+                        "strategy": strategy,
+                        "affected_section": result.affected_section,
+                    }
+                )
         payload = {
             "query": query,
             "response": response_text,
             "failed_criteria": failed,
             "criteria": [criterion.model_dump() for criterion in criteria],
-            "instruction": "Repair ONLY failed criteria. Preserve all other content.",
+            "sections": [section.model_dump() for section in sections],
+            "repair_instructions": instructions,
+            "output_format": (
+                "JSON array of {section_id, revised_text, criterion, strategy}"
+            ),
+            "instruction": "Repair ONLY failed criteria using minimal edits. Preserve all other content.",
         }
         return (
-            "Revise the response to fix ONLY the failed criteria. "
-            "Do not remove or degrade successful content. "
-            "Return the revised response text only.\n\n"
+            "Return ONLY deltas for the affected sections. "
+            "Do not rewrite unaffected sections. "
+            "Keep edits minimal while improving failed criteria. "
+            "Return ONLY JSON.\n\n"
             f"{json.dumps(payload, ensure_ascii=True)}"
         )
+
+    def _strategy_for(self, name: str) -> str:
+        return self._strategy_map.get(name.lower(), "improve the criterion")
+
+
+def _apply_deltas(sections: list[Section], deltas: list[RepairDelta]) -> str:
+    updated = {section.id: section.text for section in sections}
+    for delta in deltas:
+        if delta.section_id in updated:
+            updated[delta.section_id] = delta.revised_text
+    ordered = [updated[section.id] for section in sections]
+    return "\n\n".join(ordered)
+
+
+def _normalize_deltas(payload: object) -> list[RepairDelta]:
+    adapter = TypeAdapter(list[RepairDelta])
+    if isinstance(payload, list):
+        return adapter.validate_python(payload)
+    if isinstance(payload, dict):
+        transformed = [
+            {
+                "section_id": key,
+                "revised_text": value,
+                "criterion": "unknown",
+                "strategy": "improve the criterion",
+            }
+            for key, value in payload.items()
+        ]
+        return adapter.validate_python(transformed)
+    return adapter.validate_python(payload)

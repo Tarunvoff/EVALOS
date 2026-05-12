@@ -23,6 +23,7 @@ class FakeProvider(BaseProvider):
                     "description": "Clear and well-structured",
                     "weight": 1.0,
                     "threshold": 0.7,
+                    "severity": "medium",
                 }
             ]
             return {"choices": [{"message": {"content": json.dumps(payload)}}]}
@@ -38,13 +39,25 @@ class FakeProvider(BaseProvider):
                         "score": score,
                         "passed": score >= 0.7,
                         "rationale": "ok",
+                        "confidence": 0.9,
+                        "reason": "needs tightening",
+                        "affected_section": "s1",
+                        "suggested_strategy": "simplify wording and structure",
                     }
                 ]
             }
             return {"choices": [{"message": {"content": json.dumps(payload)}}]}
 
         if "repair only failed criteria" in system:
-            return {"choices": [{"message": {"content": "REPAIRED"}}]}
+            payload = [
+                {
+                    "section_id": "s1",
+                    "revised_text": "REPAIRED",
+                    "criterion": "clarity",
+                    "strategy": "simplify wording and structure",
+                }
+            ]
+            return {"choices": [{"message": {"content": json.dumps(payload)}}]}
 
         return {"choices": [{"message": {"content": "DRAFT"}}]}
 
