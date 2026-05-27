@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from typing import Any
 
 import anyio
 
@@ -23,11 +24,11 @@ class ResilientProvider(BaseProvider):
     def last_attempts(self) -> int:
         return self._last_attempts
 
-    async def generate(self, *, model: str, messages: list[dict]) -> dict:
+    async def generate(self, *, model: str, messages: list[dict], **kwargs: Any) -> dict:
         async def _call() -> dict:
             try:
                 with anyio.fail_after(self._timeout_s):
-                    return await self._inner.generate(model=model, messages=messages)
+                    return await self._inner.generate(model=model, messages=messages, **kwargs)
             except TimeoutError as exc:
                 raise EvalosTimeoutError("Provider call timed out") from exc
             except Exception as exc:
@@ -43,9 +44,8 @@ class ResilientProvider(BaseProvider):
         self._last_attempts = 1
         try:
             stream = self._inner.stream(model=model, messages=messages)
-            with anyio.fail_after(self._timeout_s):
-                async for event in stream:
-                    yield event
+            async for event in stream:
+                yield event
         except TimeoutError as exc:
             raise EvalosTimeoutError("Provider stream timed out") from exc
         except Exception as exc:

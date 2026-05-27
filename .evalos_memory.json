@@ -1,0 +1,65 @@
+{
+  "memory_version": 2,
+  "model_stats": {
+    "test": {
+      "observations": 3,
+      "evaluations": 2.7,
+      "failed_criteria_total": 1.8,
+      "criteria_total": 2.7,
+      "criterion_failures": {
+        "clarity": {
+          "count": 1.8,
+          "last_ts": 1779876085.0216317
+        }
+      }
+    }
+  },
+  "domain_stats": {
+    "general": {
+      "observations": 3,
+      "evaluations": 2.7,
+      "failed_criteria_total": 1.8,
+      "criteria_total": 2.7,
+      "criterion_failures": {
+        "clarity": {
+          "count": 1.8,
+          "last_ts": 1779876085.0216339
+        }
+      }
+    }
+  },
+  "repair_stats": {
+    "simplify wording and structure": {
+      "observations": 1,
+      "attempts": 0.9,
+      "successes": 0.9,
+      "success_rate": 0.9,
+      "last_success_ts": 1779876085.0048609,
+      "last_attempt_ts": 1779876085.0048597
+    }
+  },
+  "section_stats": {
+    "s1": {
+      "stable_after_attempt": 1,
+      "rollback_count": 0,
+      "last_failed_attempt": 0,
+      "last_stable_attempt": 1
+    }
+  },
+  "threshold_stats": {
+    "clarity": {
+      "observations": 3,
+      "sample_count": 2.7,
+      "avg_score": 0.6333333333333333,
+      "failure_count": 1.8,
+      "recommended_threshold": 0.7775
+    }
+  },
+  "threshold_history": {
+    "clarity": [
+      0.8174999999999999,
+      0.7575,
+      0.7775
+    ]
+  }
+}

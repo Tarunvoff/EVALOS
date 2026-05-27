@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
+from typing import Any
 
 from evalos.types import StreamEvent
 
@@ -14,7 +15,7 @@ class BaseProvider(ABC):
         return 1
 
     @abstractmethod
-    async def generate(self, *, model: str, messages: list[dict]) -> dict:
+    async def generate(self, *, model: str, messages: list[dict], **kwargs: Any) -> dict:
         raise NotImplementedError
 
     @abstractmethod

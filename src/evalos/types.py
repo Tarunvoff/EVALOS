@@ -106,6 +106,13 @@ class Metrics(BaseModel):
     estimated_full_retry_tokens: float = 0.0
     repair_token_cost: float = 0.0
     improvement_delta: float = 0.0
+    adaptation_strength: float = 0.0
+    threshold_drift: float = 0.0
+    decay_effect: float = 0.0
+    rollback_frequency: float = 0.0
+    memory_confidence: float = 0.0
+    adaptation_ready: bool = False
+    adaptation_metrics: dict[str, Any] = Field(default_factory=dict)
 
 
 class RepairDelta(BaseModel):
@@ -130,10 +137,33 @@ class RepairRecord(BaseModel):
 
 class GenerationResponse(BaseModel):
     text: str
+    initial_text: str | None = None
     raw: Any | None = None
     evaluation: EvaluationResult | None = None
     repairs: list[RepairRecord] = Field(default_factory=list)
     metrics: Metrics
+
+    def format_trace(self) -> str:
+        lines = []
+        lines.append("=== EvalOS Request Trace ===")
+        lines.append(f"Model: {self.metrics.model} | Provider: {self.metrics.provider}")
+        lines.append(f"Latency: {self.metrics.latency_ms:.1f}ms | Retries: {self.metrics.retries}")
+        lines.append(f"Tokens: {self.metrics.usage.total_tokens} (saved vs retry: {self.metrics.tokens_saved_vs_retry})")
+        
+        lines.append("\n--- Repair Timeline Graph ---")
+        lines.append(f"Initial Score: {self.metrics.quality_before:.2f}")
+        for r in self.repairs:
+            failed = ", ".join(r.failed_criteria) if r.failed_criteria else "None"
+            lines.append(f"  v Attempt {r.attempt} -> Score: {r.score_after:.2f} (Repaired: {failed})")
+        
+        lines.append("\n--- Before/After Comparison ---")
+        if self.initial_text and self.text != self.initial_text:
+            lines.append(f"[Before]\n{self.initial_text}\n")
+            lines.append(f"[After]\n{self.text}")
+        else:
+            lines.append("[No changes made or initial text unavailable]")
+            
+        return "\n".join(lines)
 
 
 class StreamEvent(BaseModel):

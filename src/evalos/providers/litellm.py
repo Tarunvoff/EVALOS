@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from typing import Any
 
 import litellm
 
@@ -12,9 +13,9 @@ from evalos.providers.base import BaseProvider
 class LiteLLMProvider(BaseProvider):
     name = "litellm"
 
-    async def generate(self, *, model: str, messages: list[dict]) -> dict:
+    async def generate(self, *, model: str, messages: list[dict], **kwargs: Any) -> dict:
         try:
-            response = await litellm.acompletion(model=model, messages=messages)
+            response = await litellm.acompletion(model=model, messages=messages, **kwargs)
         except Exception as exc:  # pragma: no cover - passthrough from provider
             raise ProviderError("LiteLLM generate failed") from exc
         return response

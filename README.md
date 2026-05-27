@@ -38,6 +38,9 @@ response = await pipeline.generate(
 
 print(response.text)
 print(response.metrics)
+
+# Print Observability Trace (Timeline Graph & Before/After Comparison)
+print(response.format_trace())
 ```
 
 ### Streaming

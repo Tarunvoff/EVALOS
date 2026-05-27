@@ -26,29 +26,45 @@ class Evaluator:
         query: str,
         response_text: str,
         criteria: list[Criterion],
+        strictness_override: str | None = None,
+        threshold_overrides: dict[str, float] | None = None,
+        weight_overrides: dict[str, float] | None = None,
     ) -> EvaluationResult:
         model = self._config.eval_model or self._config.model
         sections = _split_sections(response_text)
-        prompt = self._build_prompt(query, response_text, criteria, sections)
+        strictness = strictness_override or self._config.evaluation_strictness
+        prompt = self._build_prompt(query, response_text, criteria, sections, strictness)
         messages = [
             {"role": "system", "content": "You are an adversarial evaluator."},
             {"role": "user", "content": prompt},
         ]
 
         try:
-            response = await self._provider.generate(model=model, messages=messages)
+            response = await self._provider.generate(
+                model=model,
+                messages=messages,
+                temperature=0.0,
+            )
             content = response["choices"][0]["message"]["content"]
             payload = extract_json(content)
             parsed = _EvalPayload.model_validate(payload)
             thresholds = {
                 criterion.name: _adjust_threshold(
                     criterion.threshold,
-                    self._config.evaluation_strictness,
+                    strictness,
                     self._config.strict_mode,
                 )
                 for criterion in criteria
             }
-            weights = {criterion.name: criterion.weight for criterion in criteria}
+            if threshold_overrides:
+                for name, value in threshold_overrides.items():
+                    thresholds[name] = max(thresholds.get(name, value), value)
+            weights = {
+                criterion.name: weight_overrides.get(criterion.name, criterion.weight)
+                if weight_overrides
+                else criterion.weight
+                for criterion in criteria
+            }
             severities = {criterion.name: criterion.severity for criterion in criteria}
             normalized: list[CriterionResult] = []
             failed: list[str] = []
@@ -106,8 +122,8 @@ class Evaluator:
         response_text: str,
         criteria: list[Criterion],
         sections: list[Section],
+        strictness: str,
     ) -> str:
-        strictness = self._config.evaluation_strictness
         strict_mode = self._config.strict_mode
         payload = {
             "query": query,

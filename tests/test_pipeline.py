@@ -12,7 +12,7 @@ from evalos.types import StreamEvent
 class FakeProvider(BaseProvider):
     name = "fake"
 
-    async def generate(self, *, model: str, messages: list[dict]) -> dict:
+    async def generate(self, *, model: str, messages: list[dict], **kwargs) -> dict:
         system = messages[0]["content"]
         user = messages[1]["content"]
 
@@ -28,7 +28,7 @@ class FakeProvider(BaseProvider):
             ]
             return {"choices": [{"message": {"content": json.dumps(payload)}}]}
 
-        if "strict evaluator" in system:
+        if "adversarial evaluator" in system:
             score = 0.5
             if "REPAIRED" in user:
                 score = 0.9

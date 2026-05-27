@@ -32,9 +32,20 @@ class RepairEngine:
         evaluation: EvaluationResult,
         criteria: list[Criterion],
         sections: list[Section],
+        locked_sections: set[str] | None = None,
+        strategy_overrides: dict[str, str] | None = None,
     ) -> tuple[str, list[RepairDelta], list[str], list[str], int]:
         failed = evaluation.failed
-        prompt = self._build_prompt(query, response_text, failed, criteria, sections, evaluation)
+        prompt = self._build_prompt(
+            query,
+            response_text,
+            failed,
+            criteria,
+            sections,
+            evaluation,
+            locked_sections,
+            strategy_overrides,
+        )
         messages = [
             {"role": "system", "content": "You repair only failed criteria."},
             {"role": "user", "content": prompt},
@@ -65,11 +76,19 @@ class RepairEngine:
         criteria: list[Criterion],
         sections: list[Section],
         evaluation: EvaluationResult,
+        locked_sections: set[str] | None = None,
+        strategy_overrides: dict[str, str] | None = None,
     ) -> str:
         instructions = []
         for result in evaluation.results:
             if not result.passed:
-                strategy = result.suggested_strategy or self._strategy_for(result.name)
+                if locked_sections and result.affected_section in locked_sections:
+                    continue
+                strategy = None
+                if strategy_overrides:
+                    strategy = strategy_overrides.get(result.name)
+                if not strategy:
+                    strategy = result.suggested_strategy or self._strategy_for(result.name)
                 instructions.append(
                     {
                         "criterion": result.name,
@@ -77,6 +96,8 @@ class RepairEngine:
                         "affected_section": result.affected_section,
                     }
                 )
+        
+        locked_list = list(locked_sections) if locked_sections else []
         payload = {
             "query": query,
             "response": response_text,
@@ -89,9 +110,13 @@ class RepairEngine:
             ),
             "instruction": "Repair ONLY failed criteria using minimal edits. Preserve all other content.",
         }
+        if locked_list:
+            payload["locked_sections"] = locked_list
+            
         return (
             "Return ONLY deltas for the affected sections. "
             "Do not rewrite unaffected sections. "
+            "Do NOT modify any sections listed in locked_sections. "
             "Keep edits minimal while improving failed criteria. "
             "Return ONLY JSON.\n\n"
             f"{json.dumps(payload, ensure_ascii=True)}"
