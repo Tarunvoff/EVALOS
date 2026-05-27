@@ -67,6 +67,22 @@ class ThresholdStats(BaseModel):
     recommended_threshold: float | None = None
 
 
+class RagModelStats(BaseModel):
+    observations: int = 0
+    hallucination_count: float = 0.0
+    grounding_failures: float = 0.0
+    citation_failures: float = 0.0
+    tool_failures: float = 0.0
+    last_ts: float | None = None
+
+
+class RagDomainStats(BaseModel):
+    observations: int = 0
+    grounding_failures: float = 0.0
+    citation_failures: float = 0.0
+    last_ts: float | None = None
+
+
 class MemoryState(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     memory_version: int = Field(default=2, alias="version")
@@ -76,3 +92,5 @@ class MemoryState(BaseModel):
     section_stats: dict[str, SectionStabilityStats] = Field(default_factory=dict)
     threshold_stats: dict[str, ThresholdStats] = Field(default_factory=dict)
     threshold_history: dict[str, list[float]] = Field(default_factory=dict)
+    rag_model_stats: dict[str, RagModelStats] = Field(default_factory=dict)
+    rag_domain_stats: dict[str, RagDomainStats] = Field(default_factory=dict)

@@ -14,6 +14,20 @@ from evalos.observability.tracer import RollbackEvent, Trace
 from evalos.providers.base import BaseProvider
 from evalos.providers.resilient import ResilientProvider
 from evalos.repair import RepairEngine
+from evalos.rag.agent_eval import AgentReliabilityEvaluator
+from evalos.rag.canonical import build_canonical_id_map, canonicalize_claims
+from evalos.rag.citation import CitationEvaluator
+from evalos.rag.grounding import GroundingEvaluator, _build_claim_map, _extract_claims
+from evalos.rag.hallucination import HallucinationDetector
+from evalos.rag.dependency import (
+    ClaimDependency,
+    canonicalize_dependencies,
+    validate_dependencies,
+)
+from evalos.rag.repair_rag import RAGRepairEngine
+from evalos.rag.schema import Provenance
+from evalos.rag.retriever import CitationMapping, normalize_documents
+from evalos.rag.validation import validate_agent_trace, validate_citations
 from evalos.types import (
     EvaluationResult,
     GenerationResponse,
@@ -85,11 +99,28 @@ class Pipeline:
         self._criteria = CriteriaGenerator(self._provider, self._config)
         self._evaluator = Evaluator(self._provider, self._config)
         self._repair = RepairEngine(self._provider, self._config)
+        self._grounding = GroundingEvaluator()
+        self._hallucination = HallucinationDetector()
+        self._citation_eval = CitationEvaluator()
+        self._agent_eval = AgentReliabilityEvaluator()
+        self._rag_repair = RAGRepairEngine(
+            self._provider,
+            model=self._config.repair_model or self._config.model,
+        )
         self._memory = memory or Memory()
         self._logger = structlog.get_logger("evalos.pipeline")
 
     async def generate(
-        self, *, query: str, optimize_for: list[str], domain: str | None = None
+        self,
+        *,
+        query: str,
+        optimize_for: list[str],
+        domain: str | None = None,
+        retrieved_documents: list[dict[str, Any]] | None = None,
+        citations: list[dict[str, Any]] | None = None,
+        agent_trace: dict[str, Any] | None = None,
+        claim_map: dict[str, str] | None = None,
+        claim_dependencies: list[dict[str, Any]] | None = None,
     ) -> GenerationResponse:
         start = time.perf_counter()
         domain_name = domain or self._config.profile
@@ -156,10 +187,328 @@ class Pipeline:
             duration_ms=generation_ms,
         )
 
+        rag_text = text
+        rag_ms = 0.0
+        rag_grounding = None
+        rag_hallucination = None
+        rag_citation = None
+        rag_agent = None
+        rag_repair = None
+        rag_repair_gain = 0.0
+        rag_payload: dict[str, Any] | None = None
+        normalized_docs = normalize_documents(retrieved_documents or [])
+        normalized_citations = _normalize_citations(citations)
+
+        citation_validation = None
+        agent_validation = None
+        rag_schema_ok = True
+        agent_schema_ok = True
+        resolved_claim_map: dict[str, str] | None = claim_map
+        dependency_errors: list[str] = []
+        dependency_models: list[ClaimDependency] = []
+        canonical_claims: list[dict[str, object]] = []
+        external_to_canonical: dict[str, str] = {}
+        claim_provenance = Provenance(origin="caller" if claim_map else "generated")
+
+        if resolved_claim_map is None and (citations is not None or claim_dependencies or normalized_docs):
+            resolved_claim_map = _build_claim_map(_extract_claims(rag_text))
+        if resolved_claim_map:
+            canonical_items = canonicalize_claims(
+                claim_map=resolved_claim_map,
+                provided_order=sorted(resolved_claim_map.keys()),
+                provenance=claim_provenance,
+            )
+            external_to_canonical = build_canonical_id_map(canonical_items)
+            canonical_claims = [
+                {
+                    "canonical_claim_id": item.canonical_claim_id,
+                    "external_claim_id": item.external_claim_id,
+                    "internal_claim_index": item.internal_claim_index,
+                }
+                for item in canonical_items
+            ]
+            trace.claim_canonicalization = canonical_claims
+        canonical_claims: list[dict[str, object]] = []
+        external_to_canonical: dict[str, str] = {}
+        claim_provenance = Provenance(origin="caller" if claim_map else "generated")
+
+        if resolved_claim_map is None and (citations is not None or claim_dependencies or normalized_docs):
+            resolved_claim_map = _build_claim_map(_extract_claims(rag_text))
+        if resolved_claim_map:
+            canonical_items = canonicalize_claims(
+                claim_map=resolved_claim_map,
+                provided_order=sorted(resolved_claim_map.keys()),
+                provenance=claim_provenance,
+            )
+            external_to_canonical = build_canonical_id_map(canonical_items)
+            canonical_claims = [
+                {
+                    "canonical_claim_id": item.canonical_claim_id,
+                    "external_claim_id": item.external_claim_id,
+                    "internal_claim_index": item.internal_claim_index,
+                }
+                for item in canonical_items
+            ]
+            trace.claim_canonicalization = canonical_claims
+
+        if citations is not None:
+            if not normalized_docs:
+                rag_schema_ok = False
+                trace.schema_validation.append(
+                    {
+                        "source": "citations",
+                        "status": "failed",
+                        "errors": ["missing_retrieved_documents"],
+                    }
+                )
+                trace.add_step(
+                    "schema_validation_failed",
+                    data={"source": "citations", "reason": "missing_documents"},
+                )
+                normalized_citations = []
+            else:
+                citation_validation = validate_citations(
+                    retrieved_documents=normalized_docs,
+                    generated_response=rag_text,
+                    citations=normalized_citations,
+                    claim_map=resolved_claim_map,
+                )
+                resolved_claim_map = citation_validation.claim_map
+                trace.schema_validation.append(
+                    {
+                        "source": "citations",
+                        "status": "passed" if citation_validation.valid else "failed",
+                        "repaired": citation_validation.repaired,
+                        "error_count": len(citation_validation.errors),
+                    }
+                )
+                if citation_validation.errors:
+                    trace.add_step(
+                        "schema_validation",
+                        data={
+                            "source": "citations",
+                            "errors": [error.code for error in citation_validation.errors],
+                        },
+                    )
+                if not citation_validation.valid:
+                    rag_schema_ok = False
+                normalized_citations = (
+                    citation_validation.citations if citation_validation.valid else []
+                )
+
+        if agent_trace is not None:
+            agent_validation = validate_agent_trace(agent_trace=agent_trace)
+            trace.schema_validation.append(
+                {
+                    "source": "agent_trace",
+                    "status": "passed" if agent_validation.valid else "failed",
+                    "repaired": agent_validation.repaired,
+                    "error_count": len(agent_validation.errors),
+                }
+            )
+            if agent_validation.errors:
+                trace.add_step(
+                    "schema_validation",
+                    data={
+                        "source": "agent_trace",
+                        "errors": [error.code for error in agent_validation.errors],
+                    },
+                )
+            if not agent_validation.valid:
+                agent_schema_ok = False
+
+        trace.provenance = {
+            "claims": "caller" if claim_map else "generated",
+            "citations": "caller" if citations is not None else "none",
+            "agent_trace": "caller" if agent_trace is not None else "none",
+            "repairs": "selective",
+            "memory": "adaptive",
+            "schema_version": trace.schema_version,
+        }
+
+        trace.provenance = {
+            "claims": "caller" if claim_map else "generated",
+            "citations": "caller" if citations is not None else "none",
+            "agent_trace": "caller" if agent_trace is not None else "none",
+            "repairs": "selective",
+            "memory": "adaptive",
+            "schema_version": trace.schema_version,
+        }
+
+        if claim_dependencies:
+            dependency_models = [ClaimDependency.model_validate(item) for item in claim_dependencies]
+            if resolved_claim_map:
+                dependency_errors = validate_dependencies(
+                    claim_ids=set(resolved_claim_map.keys()),
+                    dependencies=dependency_models,
+                )
+            if dependency_errors:
+                trace.schema_validation.append(
+                    {
+                        "source": "claim_dependencies",
+                        "status": "failed",
+                        "errors": dependency_errors,
+                    }
+                )
+                trace.add_step(
+                    "schema_validation",
+                    data={"source": "claim_dependencies", "errors": dependency_errors},
+                )
+            if external_to_canonical:
+                trace.claim_dependencies = [
+                    item.model_dump()
+                    for item in canonicalize_dependencies(
+                        dependencies=dependency_models,
+                        external_to_canonical=external_to_canonical,
+                    )
+                ]
+            if external_to_canonical:
+                trace.claim_dependencies = [
+                    item.model_dump()
+                    for item in canonicalize_dependencies(
+                        dependencies=dependency_models,
+                        external_to_canonical=external_to_canonical,
+                    )
+                ]
+
+        if normalized_docs and rag_schema_ok:
+            trace.retrieval_inputs = _rag_doc_summaries(normalized_docs)
+            rag_start = time.perf_counter()
+            rag_grounding = self._grounding.evaluate(
+                retrieved_documents=normalized_docs,
+                generated_response=rag_text,
+                citations=normalized_citations,
+                claim_map=resolved_claim_map,
+                dependencies=[item.model_dump() for item in dependency_models],
+            )
+            rag_hallucination = self._hallucination.evaluate(grounding=rag_grounding)
+            rag_citation = self._citation_eval.evaluate(
+                retrieved_documents=normalized_docs,
+                citations=normalized_citations,
+                grounding=rag_grounding,
+                claim_map=resolved_claim_map,
+            )
+            if (
+                rag_grounding.unsupported_claims
+                or rag_hallucination.hallucinated_spans
+                or rag_citation.missing_citations
+            ):
+                rag_repair = await self._rag_repair.repair(
+                    response_text=rag_text,
+                    retrieved_documents=normalized_docs,
+                    grounding=rag_grounding,
+                    hallucination=rag_hallucination,
+                    citations=normalized_citations,
+                    citation_eval=rag_citation,
+                )
+                if rag_repair.applied:
+                    rag_text = rag_repair.repaired_text
+                    updated_grounding = self._grounding.evaluate(
+                        retrieved_documents=normalized_docs,
+                        generated_response=rag_text,
+                        citations=normalized_citations,
+                        claim_map=resolved_claim_map,
+                        dependencies=[item.model_dump() for item in dependency_models],
+                    )
+                    rag_repair_gain = (
+                        updated_grounding.grounding_score - rag_grounding.grounding_score
+                    )
+                    rag_grounding = updated_grounding
+                    rag_hallucination = self._hallucination.evaluate(grounding=rag_grounding)
+                    rag_citation = self._citation_eval.evaluate(
+                        retrieved_documents=normalized_docs,
+                        citations=normalized_citations,
+                        grounding=rag_grounding,
+                        claim_map=resolved_claim_map,
+                    )
+            rag_ms = (time.perf_counter() - rag_start) * 1000.0
+            latency_breakdown["rag_ms"] = rag_ms
+            trace.grounding = rag_grounding.model_dump()
+            trace.hallucination = rag_hallucination.model_dump()
+            trace.citation = rag_citation.model_dump()
+            if not trace.claim_canonicalization:
+                trace.claim_canonicalization = rag_grounding.canonical_claims
+            if dependency_models and not trace.claim_dependencies:
+                trace.claim_dependencies = [item.model_dump() for item in dependency_models]
+            if rag_repair:
+                trace.rag_repair = rag_repair.model_dump()
+            trace.add_step(
+                "rag_evaluation",
+                data={
+                    "grounding_score": rag_grounding.grounding_score,
+                    "hallucination_score": rag_hallucination.hallucination_score,
+                    "citation_accuracy": rag_citation.citation_accuracy_score,
+                    "citation_precision": rag_citation.citation_precision,
+                    "repair_applied": bool(rag_repair and rag_repair.applied),
+                },
+                duration_ms=rag_ms,
+            )
+        elif normalized_docs and not rag_schema_ok:
+            trace.add_step(
+                "rag_evaluation_skipped",
+                data={"reason": "schema_validation_failed"},
+            )
+
+        if agent_trace and agent_schema_ok and agent_validation is not None:
+            rag_agent = self._agent_eval.evaluate(trace=agent_validation.trace)
+            trace.agent_evaluation = rag_agent.model_dump()
+            trace.agent_trace = agent_validation.trace.model_dump()
+            trace.add_step(
+                "agent_evaluation",
+                data={
+                    "tool_correctness": rag_agent.tool_correctness_score,
+                    "planning_score": rag_agent.planning_score,
+                    "execution_alignment": rag_agent.execution_alignment_score,
+                    "hallucinated_tool_usage": rag_agent.hallucinated_tool_usage,
+                    "hallucinated_tool_usage_rate": rag_agent.hallucinated_tool_usage_rate,
+                    "reasoning_consistency": rag_agent.reasoning_consistency_score,
+                },
+            )
+        elif agent_trace and not agent_schema_ok:
+            trace.add_step(
+                "agent_evaluation_skipped",
+                data={"reason": "schema_validation_failed"},
+            )
+
+        if rag_grounding or rag_agent:
+            await self._memory.arecord_rag_signals(
+                model=self._config.model,
+                domain=domain_name,
+                grounding_score=rag_grounding.grounding_score if rag_grounding else 1.0,
+                hallucination_score=rag_hallucination.hallucination_score
+                if rag_hallucination
+                else 0.0,
+                citation_accuracy=rag_citation.citation_accuracy_score if rag_citation else 1.0,
+                tool_correctness=rag_agent.tool_correctness_score if rag_agent else None,
+                weight=1.0,
+            )
+            rag_payload = {
+                "grounding": rag_grounding.model_dump() if rag_grounding else None,
+                "hallucination": rag_hallucination.model_dump() if rag_hallucination else None,
+                "citation": rag_citation.model_dump() if rag_citation else None,
+                "agent": rag_agent.model_dump() if rag_agent else None,
+                "repair": rag_repair.model_dump() if rag_repair else None,
+                "canonical_claims": rag_grounding.canonical_claims if rag_grounding else None,
+                "claim_dependencies": [item.model_dump() for item in dependency_models]
+                if dependency_models
+                else None,
+            }
+        elif citation_validation or agent_validation:
+            rag_payload = {
+                "schema_validation": {
+                    "citations": citation_validation.model_dump()
+                    if citation_validation
+                    else None,
+                    "agent_trace": agent_validation.model_dump()
+                    if agent_validation
+                    else None,
+                }
+            }
+
         evaluation_start = time.perf_counter()
         evaluation = await self._evaluator.evaluate(
             query=query,
-            response_text=text,
+            response_text=rag_text,
             criteria=criteria,
             strictness_override=strictness_override,
             threshold_overrides=threshold_overrides,
@@ -198,7 +547,7 @@ class Pipeline:
         trace.add_step("memory_recorded", duration_ms=memory_ms)
 
         repairs: list[RepairRecord] = []
-        current_text = text
+        current_text = rag_text
         current_eval = evaluation
         locked_sections: set[str] = set()
         rollback_count = 0
@@ -251,7 +600,7 @@ class Pipeline:
                 },
                 duration_ms=repair_ms,
             )
-            
+
             reevaluate_start = time.perf_counter()
             new_eval = await self._evaluator.evaluate(
                 query=query,
@@ -276,7 +625,11 @@ class Pipeline:
             )
 
             if new_eval.weighted_score < current_eval.weighted_score:
-                self._logger.info("repair_degraded_score_rollback", score_before=current_eval.weighted_score, score_after=new_eval.weighted_score)
+                self._logger.info(
+                    "repair_degraded_score_rollback",
+                    score_before=current_eval.weighted_score,
+                    score_after=new_eval.weighted_score,
+                )
                 rollback_count += 1
                 rollback_events.append(
                     RollbackEvent(
@@ -308,7 +661,7 @@ class Pipeline:
                     rollback=True,
                 )
                 break
-                
+
             locked_sections.update(failed_sections)
             success = new_eval.passed or (
                 len(new_eval.failed) < len(current_eval.failed)
@@ -346,6 +699,11 @@ class Pipeline:
                     deltas=deltas,
                     repair_tokens=repair_tokens,
                     token_delta=repair_tokens,
+                    provenance=Provenance(
+                        origin="repair",
+                        derived_from=current_eval.failed,
+                        repair_generation=attempt,
+                    ),
                 )
             )
             current_text = repaired
@@ -409,6 +767,19 @@ class Pipeline:
                 "decay": decay,
                 "readiness": readiness,
             },
+            grounding_score=rag_grounding.grounding_score if rag_grounding else 0.0,
+            hallucination_rate=rag_hallucination.hallucination_score
+            if rag_hallucination
+            else 0.0,
+            citation_accuracy=rag_citation.citation_accuracy_score if rag_citation else 0.0,
+            citation_precision=rag_citation.citation_precision if rag_citation else 0.0,
+            tool_correctness_score=rag_agent.tool_correctness_score if rag_agent else 0.0,
+            agent_planning_score=rag_agent.planning_score if rag_agent else 0.0,
+            execution_alignment_score=rag_agent.execution_alignment_score if rag_agent else 0.0,
+            hallucinated_tool_usage_rate=rag_agent.hallucinated_tool_usage_rate if rag_agent else 0.0,
+            reasoning_consistency_score=rag_agent.reasoning_consistency_score if rag_agent else 0.0,
+            retrieval_alignment_score=rag_grounding.grounding_score if rag_grounding else 0.0,
+            rag_repair_gain=rag_repair_gain,
         )
 
         trace.repairs = repairs
@@ -449,10 +820,20 @@ class Pipeline:
             repairs=repairs,
             metrics=metrics,
             trace=trace,
+            rag=rag_payload,
         )
 
     async def stream(
-        self, *, query: str, optimize_for: list[str], domain: str | None = None
+        self,
+        *,
+        query: str,
+        optimize_for: list[str],
+        domain: str | None = None,
+        retrieved_documents: list[dict[str, Any]] | None = None,
+        citations: list[dict[str, Any]] | None = None,
+        agent_trace: dict[str, Any] | None = None,
+        claim_map: dict[str, str] | None = None,
+        claim_dependencies: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         domain_name = domain or self._config.profile
         trace = Trace.start(
@@ -520,10 +901,249 @@ class Pipeline:
             data={"model": self._generation_model(), "streamed": True},
             duration_ms=(time.perf_counter() - stream_start) * 1000.0,
         )
+        rag_text = text
+        rag_ms = 0.0
+        rag_grounding = None
+        rag_hallucination = None
+        rag_citation = None
+        rag_agent = None
+        rag_repair = None
+        rag_repair_gain = 0.0
+        rag_payload: dict[str, Any] | None = None
+        normalized_docs = normalize_documents(retrieved_documents or [])
+        normalized_citations = _normalize_citations(citations)
+
+        citation_validation = None
+        agent_validation = None
+        rag_schema_ok = True
+        agent_schema_ok = True
+        resolved_claim_map: dict[str, str] | None = claim_map
+        dependency_errors: list[str] = []
+        dependency_models: list[ClaimDependency] = []
+
+        if citations is not None:
+            if not normalized_docs:
+                rag_schema_ok = False
+                trace.schema_validation.append(
+                    {
+                        "source": "citations",
+                        "status": "failed",
+                        "errors": ["missing_retrieved_documents"],
+                    }
+                )
+                trace.add_step(
+                    "schema_validation_failed",
+                    data={"source": "citations", "reason": "missing_documents"},
+                )
+                normalized_citations = []
+            else:
+                citation_validation = validate_citations(
+                    retrieved_documents=normalized_docs,
+                    generated_response=rag_text,
+                    citations=normalized_citations,
+                    claim_map=resolved_claim_map,
+                )
+                resolved_claim_map = citation_validation.claim_map
+                trace.schema_validation.append(
+                    {
+                        "source": "citations",
+                        "status": "passed" if citation_validation.valid else "failed",
+                        "repaired": citation_validation.repaired,
+                        "error_count": len(citation_validation.errors),
+                    }
+                )
+                if citation_validation.errors:
+                    trace.add_step(
+                        "schema_validation",
+                        data={
+                            "source": "citations",
+                            "errors": [error.code for error in citation_validation.errors],
+                        },
+                    )
+                if not citation_validation.valid:
+                    rag_schema_ok = False
+                normalized_citations = (
+                    citation_validation.citations if citation_validation.valid else []
+                )
+
+        if agent_trace is not None:
+            agent_validation = validate_agent_trace(agent_trace=agent_trace)
+            trace.schema_validation.append(
+                {
+                    "source": "agent_trace",
+                    "status": "passed" if agent_validation.valid else "failed",
+                    "repaired": agent_validation.repaired,
+                    "error_count": len(agent_validation.errors),
+                }
+            )
+            if agent_validation.errors:
+                trace.add_step(
+                    "schema_validation",
+                    data={
+                        "source": "agent_trace",
+                        "errors": [error.code for error in agent_validation.errors],
+                    },
+                )
+            if not agent_validation.valid:
+                agent_schema_ok = False
+
+        if claim_dependencies:
+            dependency_models = [ClaimDependency.model_validate(item) for item in claim_dependencies]
+            if resolved_claim_map:
+                dependency_errors = validate_dependencies(
+                    claim_ids=set(resolved_claim_map.keys()),
+                    dependencies=dependency_models,
+                )
+            if dependency_errors:
+                trace.schema_validation.append(
+                    {
+                        "source": "claim_dependencies",
+                        "status": "failed",
+                        "errors": dependency_errors,
+                    }
+                )
+                trace.add_step(
+                    "schema_validation",
+                    data={"source": "claim_dependencies", "errors": dependency_errors},
+                )
+
+        if normalized_docs and rag_schema_ok:
+            trace.retrieval_inputs = _rag_doc_summaries(normalized_docs)
+            rag_start = time.perf_counter()
+            rag_grounding = self._grounding.evaluate(
+                retrieved_documents=normalized_docs,
+                generated_response=rag_text,
+                citations=normalized_citations,
+                claim_map=resolved_claim_map,
+                dependencies=[item.model_dump() for item in dependency_models],
+            )
+            rag_hallucination = self._hallucination.evaluate(grounding=rag_grounding)
+            rag_citation = self._citation_eval.evaluate(
+                retrieved_documents=normalized_docs,
+                citations=normalized_citations,
+                grounding=rag_grounding,
+                claim_map=resolved_claim_map,
+            )
+            if (
+                rag_grounding.unsupported_claims
+                or rag_hallucination.hallucinated_spans
+                or rag_citation.missing_citations
+            ):
+                rag_repair = await self._rag_repair.repair(
+                    response_text=rag_text,
+                    retrieved_documents=normalized_docs,
+                    grounding=rag_grounding,
+                    hallucination=rag_hallucination,
+                    citations=normalized_citations,
+                    citation_eval=rag_citation,
+                )
+                if rag_repair.applied:
+                    rag_text = rag_repair.repaired_text
+                    updated_grounding = self._grounding.evaluate(
+                        retrieved_documents=normalized_docs,
+                        generated_response=rag_text,
+                        citations=normalized_citations,
+                        claim_map=resolved_claim_map,
+                        dependencies=[item.model_dump() for item in dependency_models],
+                    )
+                    rag_repair_gain = (
+                        updated_grounding.grounding_score - rag_grounding.grounding_score
+                    )
+                    rag_grounding = updated_grounding
+                    rag_hallucination = self._hallucination.evaluate(grounding=rag_grounding)
+                    rag_citation = self._citation_eval.evaluate(
+                        retrieved_documents=normalized_docs,
+                        citations=normalized_citations,
+                        grounding=rag_grounding,
+                        claim_map=resolved_claim_map,
+                    )
+            rag_ms = (time.perf_counter() - rag_start) * 1000.0
+            trace.grounding = rag_grounding.model_dump()
+            trace.hallucination = rag_hallucination.model_dump()
+            trace.citation = rag_citation.model_dump()
+            if not trace.claim_canonicalization:
+                trace.claim_canonicalization = rag_grounding.canonical_claims
+            if dependency_models and not trace.claim_dependencies:
+                trace.claim_dependencies = [item.model_dump() for item in dependency_models]
+            if rag_repair:
+                trace.rag_repair = rag_repair.model_dump()
+            trace.add_step(
+                "rag_evaluation",
+                data={
+                    "grounding_score": rag_grounding.grounding_score,
+                    "hallucination_score": rag_hallucination.hallucination_score,
+                    "citation_accuracy": rag_citation.citation_accuracy_score,
+                    "citation_precision": rag_citation.citation_precision,
+                    "repair_applied": bool(rag_repair and rag_repair.applied),
+                },
+                duration_ms=rag_ms,
+            )
+        elif normalized_docs and not rag_schema_ok:
+            trace.add_step(
+                "rag_evaluation_skipped",
+                data={"reason": "schema_validation_failed"},
+            )
+
+        if agent_trace and agent_schema_ok and agent_validation is not None:
+            rag_agent = self._agent_eval.evaluate(trace=agent_validation.trace)
+            trace.agent_evaluation = rag_agent.model_dump()
+            trace.agent_trace = agent_validation.trace.model_dump()
+            trace.add_step(
+                "agent_evaluation",
+                data={
+                    "tool_correctness": rag_agent.tool_correctness_score,
+                    "planning_score": rag_agent.planning_score,
+                    "execution_alignment": rag_agent.execution_alignment_score,
+                    "hallucinated_tool_usage": rag_agent.hallucinated_tool_usage,
+                    "hallucinated_tool_usage_rate": rag_agent.hallucinated_tool_usage_rate,
+                    "reasoning_consistency": rag_agent.reasoning_consistency_score,
+                },
+            )
+        elif agent_trace and not agent_schema_ok:
+            trace.add_step(
+                "agent_evaluation_skipped",
+                data={"reason": "schema_validation_failed"},
+            )
+
+        if rag_grounding or rag_agent:
+            await self._memory.arecord_rag_signals(
+                model=self._config.model,
+                domain=domain_name,
+                grounding_score=rag_grounding.grounding_score if rag_grounding else 1.0,
+                hallucination_score=rag_hallucination.hallucination_score
+                if rag_hallucination
+                else 0.0,
+                citation_accuracy=rag_citation.citation_accuracy_score if rag_citation else 1.0,
+                tool_correctness=rag_agent.tool_correctness_score if rag_agent else None,
+                weight=1.0,
+            )
+            rag_payload = {
+                "grounding": rag_grounding.model_dump() if rag_grounding else None,
+                "hallucination": rag_hallucination.model_dump() if rag_hallucination else None,
+                "citation": rag_citation.model_dump() if rag_citation else None,
+                "agent": rag_agent.model_dump() if rag_agent else None,
+                "repair": rag_repair.model_dump() if rag_repair else None,
+                "canonical_claims": rag_grounding.canonical_claims if rag_grounding else None,
+                "claim_dependencies": [item.model_dump() for item in dependency_models]
+                if dependency_models
+                else None,
+            }
+        elif citation_validation or agent_validation:
+            rag_payload = {
+                "schema_validation": {
+                    "citations": citation_validation.model_dump()
+                    if citation_validation
+                    else None,
+                    "agent_trace": agent_validation.model_dump()
+                    if agent_validation
+                    else None,
+                }
+            }
+
         evaluation_start = time.perf_counter()
         evaluation = await self._evaluator.evaluate(
             query=query,
-            response_text=text,
+            response_text=rag_text,
             criteria=criteria,
             strictness_override=strictness_override,
             threshold_overrides=threshold_overrides,
@@ -581,14 +1201,28 @@ class Pipeline:
                 "decay": decay,
                 "readiness": readiness,
             },
+            grounding_score=rag_grounding.grounding_score if rag_grounding else 0.0,
+            hallucination_rate=rag_hallucination.hallucination_score
+            if rag_hallucination
+            else 0.0,
+            citation_accuracy=rag_citation.citation_accuracy_score if rag_citation else 0.0,
+            citation_precision=rag_citation.citation_precision if rag_citation else 0.0,
+            tool_correctness_score=rag_agent.tool_correctness_score if rag_agent else 0.0,
+            agent_planning_score=rag_agent.planning_score if rag_agent else 0.0,
+            execution_alignment_score=rag_agent.execution_alignment_score if rag_agent else 0.0,
+            hallucinated_tool_usage_rate=rag_agent.hallucinated_tool_usage_rate if rag_agent else 0.0,
+            reasoning_consistency_score=rag_agent.reasoning_consistency_score if rag_agent else 0.0,
+            retrieval_alignment_score=rag_grounding.grounding_score if rag_grounding else 0.0,
+            rag_repair_gain=rag_repair_gain,
         )
 
-        trace.final_text = text
+        trace.final_text = rag_text
         trace.outcome = "passed" if evaluation.passed else "failed"
         trace.latency_ms = (time.perf_counter() - stream_start) * 1000.0
         trace.latency_breakdown = {
             "criteria_ms": criteria_ms,
             "stream_ms": trace.latency_ms,
+            "rag_ms": rag_ms,
             "evaluation_ms": evaluation_ms,
         }
         trace.memory_influence.update(
@@ -606,12 +1240,13 @@ class Pipeline:
         yield StreamEvent(
             type="done",
             data=GenerationResponse(
-                text=text,
+                text=rag_text,
                 raw=None,
                 evaluation=evaluation,
                 repairs=[],
                 metrics=metrics,
                 trace=trace,
+                rag=rag_payload,
             ),
         )
 
@@ -623,6 +1258,7 @@ class Pipeline:
 
     def _generation_model(self) -> str:
         return self._config.generation_model or self._config.model
+
 
 def _extract_text_and_usage(response: dict) -> tuple[str, Usage]:
     try:
@@ -679,7 +1315,11 @@ def _adaptation_strength(metrics: dict[str, object]) -> float:
     thresholds = metrics.get("thresholds") if isinstance(metrics, dict) else None
     if not isinstance(thresholds, dict) or not thresholds:
         return 0.0
-    deltas = [abs(item.get("capped", 0.0) - item.get("base", 0.0)) for item in thresholds.values() if isinstance(item, dict)]
+    deltas = [
+        abs(item.get("capped", 0.0) - item.get("base", 0.0))
+        for item in thresholds.values()
+        if isinstance(item, dict)
+    ]
     return sum(deltas) / max(1, len(deltas))
 
 
@@ -699,3 +1339,36 @@ def _decay_effect(decay: dict[str, object]) -> float:
     if raw <= 0.0:
         return 0.0
     return max(0.0, min(1.0, 1.0 - (decayed / raw)))
+
+
+def _normalize_citations(
+    citations: list[CitationMapping] | list[dict[str, Any]] | None,
+) -> list[CitationMapping]:
+    if not citations:
+        return []
+    normalized: list[CitationMapping] = []
+    for item in citations:
+        if isinstance(item, CitationMapping):
+            normalized.append(item)
+        elif isinstance(item, dict):
+            try:
+                normalized.append(CitationMapping.model_validate(item))
+            except Exception:
+                continue
+    return normalized
+
+
+def _rag_doc_summaries(documents: list) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for doc in documents:
+        text = doc.text or ""
+        summaries.append(
+            {
+                "id": doc.id,
+                "source": doc.source,
+                "score": doc.score,
+                "length": len(text),
+                "preview": text[:160],
+            }
+        )
+    return summaries

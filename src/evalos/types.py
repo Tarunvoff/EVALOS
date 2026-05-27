@@ -4,6 +4,8 @@ from typing import Any, Literal, TYPE_CHECKING
 
 from pydantic import BaseModel, Field, field_validator
 
+from evalos.rag.schema import SCHEMA_VERSION, Provenance
+
 Severity = Literal["low", "medium", "high", "critical"]
 QualityProfile = Literal[
     "general",
@@ -113,6 +115,17 @@ class Metrics(BaseModel):
     memory_confidence: float = 0.0
     adaptation_ready: bool = False
     adaptation_metrics: dict[str, Any] = Field(default_factory=dict)
+    grounding_score: float = 0.0
+    hallucination_rate: float = 0.0
+    citation_accuracy: float = 0.0
+    citation_precision: float = 0.0
+    tool_correctness_score: float = 0.0
+    agent_planning_score: float = 0.0
+    execution_alignment_score: float = 0.0
+    hallucinated_tool_usage_rate: float = 0.0
+    reasoning_consistency_score: float = 0.0
+    retrieval_alignment_score: float = 0.0
+    rag_repair_gain: float = 0.0
 
 
 class RepairDelta(BaseModel):
@@ -123,6 +136,7 @@ class RepairDelta(BaseModel):
 
 
 class RepairRecord(BaseModel):
+    schema_version: str = SCHEMA_VERSION
     attempt: int
     failed_criteria: list[str]
     repaired_text: str
@@ -133,6 +147,7 @@ class RepairRecord(BaseModel):
     deltas: list[RepairDelta] = Field(default_factory=list)
     repair_tokens: int = 0
     token_delta: int = 0
+    provenance: Provenance | None = None
 
 
 class GenerationResponse(BaseModel):
@@ -142,7 +157,8 @@ class GenerationResponse(BaseModel):
     evaluation: EvaluationResult | None = None
     repairs: list[RepairRecord] = Field(default_factory=list)
     metrics: Metrics
-    trace: "Trace" | None = None
+    trace: Any | None = None
+    rag: dict[str, Any] | None = None
 
     def format_trace(self) -> str:
         if self.trace:

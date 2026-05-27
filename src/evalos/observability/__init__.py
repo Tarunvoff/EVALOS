@@ -14,7 +14,8 @@ from evalos.observability.metrics import (
     compute_long_run_analytics,
     compute_model_reliability,
 )
-from evalos.observability.exporters import export_trace_json, pretty_trace
+from evalos.observability.exporters import export_trace_json, pretty_trace, export_trace_snapshot_json
+from evalos.observability.snapshot import snapshot_trace
 
 __all__ = [
     "Trace",
@@ -33,5 +34,7 @@ __all__ = [
     "compute_long_run_analytics",
     "compute_model_reliability",
     "export_trace_json",
+    "export_trace_snapshot_json",
     "pretty_trace",
+    "snapshot_trace",
 ]

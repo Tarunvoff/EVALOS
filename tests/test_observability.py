@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from evalos.observability.tracer import Trace
+from evalos.rag.schema import Provenance
 from evalos.types import GenerationResponse, Metrics, Usage, RepairRecord
 
 def test_format_trace():
@@ -41,3 +43,20 @@ def test_format_trace():
     assert "--- Before/After Comparison ---" in trace
     assert "[Before]\nbroken text" in trace
     assert "[After]\nfixed text" in trace
+
+
+def test_trace_render_includes_repair_lineage():
+    trace = Trace.start(model="m", provider="p", query="q")
+    trace.repairs = [
+        RepairRecord(
+            attempt=1,
+            failed_criteria=["clarity"],
+            repaired_text="fixed",
+            score_before=0.4,
+            score_after=0.8,
+            provenance=Provenance(origin="repair", derived_from=["clarity"], repair_generation=1),
+        )
+    ]
+    output = trace.render()
+    assert "Repair Lineage" in output
+    assert "gen 1" in output

@@ -14,6 +14,8 @@ from evalos.memory.models import (
     FailureStats,
     MemoryState,
     ModelStats,
+    RagDomainStats,
+    RagModelStats,
     RepairStrategyStats,
     SectionStabilityStats,
     ThresholdStats,
@@ -41,6 +43,10 @@ class MemoryConfig(BaseModel):
     failure_decay_lambda: float = 1.0 / (7 * 24 * 3600)
     repair_decay_lambda: float = 1.0 / (14 * 24 * 3600)
     min_update_weight: float = 0.1
+    rag_grounding_threshold: float = 0.7
+    rag_hallucination_threshold: float = 0.25
+    rag_citation_threshold: float = 0.7
+    rag_tool_threshold: float = 0.7
 
     @field_validator(
         "max_threshold_delta",
@@ -202,6 +208,30 @@ class Memory:
                 failed_section_ids=failed_section_ids,
                 attempt=attempt,
                 rollback=rollback,
+            )
+            if self._config.autosave:
+                await self._storage.save(self._state)
+
+    async def arecord_rag_signals(
+        self,
+        *,
+        model: str,
+        domain: str,
+        grounding_score: float,
+        hallucination_score: float,
+        citation_accuracy: float,
+        tool_correctness: float | None = None,
+        weight: float = 1.0,
+    ) -> None:
+        async with self._lock:
+            self._record_rag_signals(
+                model=model,
+                domain=domain,
+                grounding_score=grounding_score,
+                hallucination_score=hallucination_score,
+                citation_accuracy=citation_accuracy,
+                tool_correctness=tool_correctness,
+                weight=weight,
             )
             if self._config.autosave:
                 await self._storage.save(self._state)
@@ -555,3 +585,32 @@ class Memory:
             if stats.last_failed_attempt is not None and stats.stable_after_attempt is None:
                 stats.stable_after_attempt = attempt
                 stats.last_stable_attempt = attempt
+
+    def _record_rag_signals(
+        self,
+        *,
+        model: str,
+        domain: str,
+        grounding_score: float,
+        hallucination_score: float,
+        citation_accuracy: float,
+        tool_correctness: float | None,
+        weight: float,
+    ) -> None:
+        model_stats = self._state.rag_model_stats.setdefault(model, RagModelStats())
+        domain_stats = self._state.rag_domain_stats.setdefault(domain, RagDomainStats())
+        model_stats.observations += 1
+        domain_stats.observations += 1
+        model_stats.last_ts = self._now()
+        domain_stats.last_ts = self._now()
+
+        if grounding_score < self._config.rag_grounding_threshold:
+            model_stats.grounding_failures += weight
+            domain_stats.grounding_failures += weight
+        if hallucination_score > self._config.rag_hallucination_threshold:
+            model_stats.hallucination_count += weight
+        if citation_accuracy < self._config.rag_citation_threshold:
+            model_stats.citation_failures += weight
+            domain_stats.citation_failures += weight
+        if tool_correctness is not None and tool_correctness < self._config.rag_tool_threshold:
+            model_stats.tool_failures += weight

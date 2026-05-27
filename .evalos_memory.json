@@ -2,40 +2,40 @@
   "memory_version": 2,
   "model_stats": {
     "test": {
-      "observations": 3,
-      "evaluations": 2.7,
-      "failed_criteria_total": 1.8,
-      "criteria_total": 2.7,
+      "observations": 12,
+      "evaluations": 10.800000000000002,
+      "failed_criteria_total": 7.200000000000001,
+      "criteria_total": 10.800000000000002,
       "criterion_failures": {
         "clarity": {
-          "count": 1.8,
-          "last_ts": 1779876085.0216317
+          "count": 7.200000000000001,
+          "last_ts": 1779912013.2345536
         }
       }
     }
   },
   "domain_stats": {
     "general": {
-      "observations": 3,
-      "evaluations": 2.7,
-      "failed_criteria_total": 1.8,
-      "criteria_total": 2.7,
+      "observations": 12,
+      "evaluations": 10.800000000000002,
+      "failed_criteria_total": 7.200000000000001,
+      "criteria_total": 10.800000000000002,
       "criterion_failures": {
         "clarity": {
-          "count": 1.8,
-          "last_ts": 1779876085.0216339
+          "count": 7.200000000000001,
+          "last_ts": 1779912013.2345557
         }
       }
     }
   },
   "repair_stats": {
     "simplify wording and structure": {
-      "observations": 1,
-      "attempts": 0.9,
-      "successes": 0.9,
-      "success_rate": 0.9,
-      "last_success_ts": 1779876085.0048609,
-      "last_attempt_ts": 1779876085.0048597
+      "observations": 4,
+      "attempts": 3.6,
+      "successes": 3.6,
+      "success_rate": 1.0,
+      "last_success_ts": 1779912013.219422,
+      "last_attempt_ts": 1779912013.2194211
     }
   },
   "section_stats": {
@@ -48,10 +48,10 @@
   },
   "threshold_stats": {
     "clarity": {
-      "observations": 3,
-      "sample_count": 2.7,
+      "observations": 12,
+      "sample_count": 10.800000000000002,
       "avg_score": 0.6333333333333333,
-      "failure_count": 1.8,
+      "failure_count": 7.200000000000001,
       "recommended_threshold": 0.7775
     }
   },
@@ -59,7 +59,18 @@
     "clarity": [
       0.8174999999999999,
       0.7575,
+      0.7775,
+      0.7874999999999999,
+      0.7695,
+      0.7775,
+      0.7832142857142856,
+      0.7725,
+      0.7775,
+      0.7814999999999999,
+      0.7738636363636363,
       0.7775
     ]
-  }
+  },
+  "rag_model_stats": {},
+  "rag_domain_stats": {}
 }
