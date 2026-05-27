@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, TYPE_CHECKING
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -142,8 +142,11 @@ class GenerationResponse(BaseModel):
     evaluation: EvaluationResult | None = None
     repairs: list[RepairRecord] = Field(default_factory=list)
     metrics: Metrics
+    trace: "Trace" | None = None
 
     def format_trace(self) -> str:
+        if self.trace:
+            return self.trace.render()
         lines = []
         lines.append("=== EvalOS Request Trace ===")
         lines.append(f"Model: {self.metrics.model} | Provider: {self.metrics.provider}")
@@ -167,5 +170,9 @@ class GenerationResponse(BaseModel):
 
 
 class StreamEvent(BaseModel):
-    type: Literal["text", "metrics", "evaluation", "done"]
+    type: Literal["text", "metrics", "evaluation", "trace", "done"]
     data: Any
+
+
+if TYPE_CHECKING:
+    from evalos.observability.tracer import Trace

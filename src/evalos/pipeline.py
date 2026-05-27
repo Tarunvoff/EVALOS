@@ -10,6 +10,7 @@ from evalos.config import PipelineConfig, RetryConfig
 from evalos.criteria import CriteriaGenerator
 from evalos.errors import ProviderError
 from evalos.eval import Evaluator
+from evalos.observability.tracer import RollbackEvent, Trace
 from evalos.providers.base import BaseProvider
 from evalos.providers.resilient import ResilientProvider
 from evalos.repair import RepairEngine
@@ -91,10 +92,26 @@ class Pipeline:
         self, *, query: str, optimize_for: list[str], domain: str | None = None
     ) -> GenerationResponse:
         start = time.perf_counter()
-        retry_total = 0
-        criteria = await self._criteria.generate(query=query, optimize_for=optimize_for)
-        retry_total += self._provider.last_attempts - 1
         domain_name = domain or self._config.profile
+        trace = Trace.start(
+            model=self._config.model,
+            provider=self._config.provider,
+            query=query,
+            domain=domain_name,
+        )
+        latency_breakdown: dict[str, float] = {}
+        retry_total = 0
+        criteria_start = time.perf_counter()
+        criteria = await self._criteria.generate(query=query, optimize_for=optimize_for)
+        criteria_ms = (time.perf_counter() - criteria_start) * 1000.0
+        latency_breakdown["criteria_ms"] = criteria_ms
+        trace.criteria = criteria
+        trace.add_step(
+            "criteria_generated",
+            data={"criteria_count": len(criteria)},
+            duration_ms=criteria_ms,
+        )
+        retry_total += self._provider.last_attempts - 1
         strictness_override = self._memory.get_strictness_override(
             model=self._config.model,
             domain=domain_name,
@@ -107,11 +124,39 @@ class Pipeline:
             criteria=criteria, domain=domain_name
         )
 
+        trace.memory_influence = {
+            "strictness": {
+                "base": self._config.evaluation_strictness,
+                "applied": strictness_override,
+            },
+            "thresholds_applied": threshold_overrides,
+            "weights_applied": weight_overrides,
+        }
+        trace.add_step(
+            "memory_overrides",
+            data={
+                "strictness": strictness_override,
+                "thresholds": list(threshold_overrides.keys()),
+                "weights": list(weight_overrides.keys()),
+            },
+        )
+
+        generation_start = time.perf_counter()
         response = await self._provider.generate(
             model=self._generation_model(), messages=self._messages(query)
         )
+        generation_ms = (time.perf_counter() - generation_start) * 1000.0
+        latency_breakdown["generation_ms"] = generation_ms
         retry_total += self._provider.last_attempts - 1
         text, usage = _extract_text_and_usage(response)
+        trace.initial_text = text
+        trace.add_step(
+            "generation",
+            data={"model": self._generation_model(), "tokens": usage.total_tokens},
+            duration_ms=generation_ms,
+        )
+
+        evaluation_start = time.perf_counter()
         evaluation = await self._evaluator.evaluate(
             query=query,
             response_text=text,
@@ -120,9 +165,22 @@ class Pipeline:
             threshold_overrides=threshold_overrides,
             weight_overrides=weight_overrides,
         )
+        evaluation_ms = (time.perf_counter() - evaluation_start) * 1000.0
+        latency_breakdown["evaluation_ms"] = evaluation_ms
         retry_total += self._provider.last_attempts - 1
         quality_before = evaluation.weighted_score
+        trace.evaluation = evaluation
+        trace.add_step(
+            "evaluation",
+            data={
+                "score": evaluation.weighted_score,
+                "passed": evaluation.passed,
+                "failed": evaluation.failed,
+            },
+            duration_ms=evaluation_ms,
+        )
 
+        memory_start = time.perf_counter()
         await self._memory.arecord_evaluation(
             model=self._config.model,
             domain=domain_name,
@@ -135,12 +193,17 @@ class Pipeline:
             failed_section_ids=_collect_failed_sections(evaluation),
             attempt=0,
         )
+        memory_ms = (time.perf_counter() - memory_start) * 1000.0
+        latency_breakdown["memory_ms"] = memory_ms
+        trace.add_step("memory_recorded", duration_ms=memory_ms)
 
         repairs: list[RepairRecord] = []
         current_text = text
         current_eval = evaluation
         locked_sections: set[str] = set()
         rollback_count = 0
+        rollback_events: list[RollbackEvent] = []
+        repair_overrides: list[dict[str, object]] = []
 
         for attempt in range(1, self._config.max_repairs + 1):
             if current_eval.passed:
@@ -155,7 +218,16 @@ class Pipeline:
                 [section_id for section_id in stable_sections if section_id not in failed_sections_now]
             )
             strategy_overrides = self._memory.get_strategy_overrides(current_eval.failed)
+            if strategy_overrides:
+                repair_overrides.append(
+                    {
+                        "attempt": attempt,
+                        "criteria": sorted(strategy_overrides.keys()),
+                        "strategy": next(iter(strategy_overrides.values()), ""),
+                    }
+                )
 
+            repair_start = time.perf_counter()
             repaired, deltas, strategies, failed_sections, repair_tokens = await self._repair.repair(
                 query=query,
                 response_text=current_text,
@@ -165,8 +237,22 @@ class Pipeline:
                 locked_sections=locked_sections,
                 strategy_overrides=strategy_overrides,
             )
+            repair_ms = (time.perf_counter() - repair_start) * 1000.0
+            latency_breakdown["repair_ms"] = latency_breakdown.get("repair_ms", 0.0) + repair_ms
             retry_total += self._provider.last_attempts - 1
+            trace.add_step(
+                "repair_attempt",
+                data={
+                    "attempt": attempt,
+                    "failed_criteria": current_eval.failed,
+                    "strategies": strategies,
+                    "failed_sections": failed_sections,
+                    "repair_tokens": repair_tokens,
+                },
+                duration_ms=repair_ms,
+            )
             
+            reevaluate_start = time.perf_counter()
             new_eval = await self._evaluator.evaluate(
                 query=query,
                 response_text=repaired,
@@ -175,11 +261,40 @@ class Pipeline:
                 threshold_overrides=threshold_overrides,
                 weight_overrides=weight_overrides,
             )
+            reevaluate_ms = (time.perf_counter() - reevaluate_start) * 1000.0
+            latency_breakdown["reevaluation_ms"] = latency_breakdown.get("reevaluation_ms", 0.0) + reevaluate_ms
             retry_total += self._provider.last_attempts - 1
+            trace.add_step(
+                "repair_evaluation",
+                data={
+                    "attempt": attempt,
+                    "score": new_eval.weighted_score,
+                    "passed": new_eval.passed,
+                    "failed": new_eval.failed,
+                },
+                duration_ms=reevaluate_ms,
+            )
 
             if new_eval.weighted_score < current_eval.weighted_score:
                 self._logger.info("repair_degraded_score_rollback", score_before=current_eval.weighted_score, score_after=new_eval.weighted_score)
                 rollback_count += 1
+                rollback_events.append(
+                    RollbackEvent(
+                        attempt=attempt,
+                        score_before=current_eval.weighted_score,
+                        score_after=new_eval.weighted_score,
+                        timestamp=time.time(),
+                        reason="repair_degraded_score",
+                    )
+                )
+                trace.add_step(
+                    "repair_rollback",
+                    data={
+                        "attempt": attempt,
+                        "score_before": current_eval.weighted_score,
+                        "score_after": new_eval.weighted_score,
+                    },
+                )
                 rollback_weight = _evaluation_confidence(new_eval) * 0.4
                 await self._memory.arecord_repair(
                     strategies=strategies,
@@ -248,6 +363,7 @@ class Pipeline:
             )
 
         latency_ms = (time.perf_counter() - start) * 1000.0
+        latency_breakdown["total_ms"] = latency_ms
         quality_after = current_eval.weighted_score if current_eval else 0.0
         repair_gain = quality_after - quality_before
         repair_efficiency = repair_gain / max(1, len(repairs))
@@ -295,6 +411,27 @@ class Pipeline:
             },
         )
 
+        trace.repairs = repairs
+        trace.rollback_events = rollback_events
+        trace.final_text = current_text
+        trace.outcome = "passed" if current_eval and current_eval.passed else "failed"
+        trace.latency_ms = latency_ms
+        trace.latency_breakdown = latency_breakdown
+        trace.token_usage = Usage(
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            total_tokens=usage.total_tokens + repair_token_cost,
+        )
+        trace.memory_influence.update(
+            {
+                "repair_bias": repair_overrides,
+                "adaptation": adaptation,
+                "decay": decay,
+                "readiness": readiness,
+            }
+        )
+        trace.add_step("request_complete", data={"outcome": trace.outcome})
+
         self._logger.info(
             "generation_complete",
             model=self._config.model,
@@ -311,13 +448,28 @@ class Pipeline:
             evaluation=current_eval,
             repairs=repairs,
             metrics=metrics,
+            trace=trace,
         )
 
     async def stream(
         self, *, query: str, optimize_for: list[str], domain: str | None = None
     ) -> AsyncIterator[StreamEvent]:
-        criteria = await self._criteria.generate(query=query, optimize_for=optimize_for)
         domain_name = domain or self._config.profile
+        trace = Trace.start(
+            model=self._config.model,
+            provider=self._config.provider,
+            query=query,
+            domain=domain_name,
+        )
+        criteria_start = time.perf_counter()
+        criteria = await self._criteria.generate(query=query, optimize_for=optimize_for)
+        criteria_ms = (time.perf_counter() - criteria_start) * 1000.0
+        trace.criteria = criteria
+        trace.add_step(
+            "criteria_generated",
+            data={"criteria_count": len(criteria)},
+            duration_ms=criteria_ms,
+        )
         strictness_override = self._memory.get_strictness_override(
             model=self._config.model,
             domain=domain_name,
@@ -329,7 +481,24 @@ class Pipeline:
         weight_overrides = self._memory.get_weight_overrides(
             criteria=criteria, domain=domain_name
         )
+        trace.memory_influence = {
+            "strictness": {
+                "base": self._config.evaluation_strictness,
+                "applied": strictness_override,
+            },
+            "thresholds_applied": threshold_overrides,
+            "weights_applied": weight_overrides,
+        }
+        trace.add_step(
+            "memory_overrides",
+            data={
+                "strictness": strictness_override,
+                "thresholds": list(threshold_overrides.keys()),
+                "weights": list(weight_overrides.keys()),
+            },
+        )
 
+        stream_start = time.perf_counter()
         stream = self._provider.stream(
             model=self._generation_model(), messages=self._messages(query)
         )
@@ -345,6 +514,13 @@ class Pipeline:
                 break
 
         text = "".join(buffer)
+        trace.initial_text = text
+        trace.add_step(
+            "generation",
+            data={"model": self._generation_model(), "streamed": True},
+            duration_ms=(time.perf_counter() - stream_start) * 1000.0,
+        )
+        evaluation_start = time.perf_counter()
         evaluation = await self._evaluator.evaluate(
             query=query,
             response_text=text,
@@ -352,6 +528,17 @@ class Pipeline:
             strictness_override=strictness_override,
             threshold_overrides=threshold_overrides,
             weight_overrides=weight_overrides,
+        )
+        evaluation_ms = (time.perf_counter() - evaluation_start) * 1000.0
+        trace.evaluation = evaluation
+        trace.add_step(
+            "evaluation",
+            data={
+                "score": evaluation.weighted_score,
+                "passed": evaluation.passed,
+                "failed": evaluation.failed,
+            },
+            duration_ms=evaluation_ms,
         )
         await self._memory.arecord_evaluation(
             model=self._config.model,
@@ -396,8 +583,26 @@ class Pipeline:
             },
         )
 
+        trace.final_text = text
+        trace.outcome = "passed" if evaluation.passed else "failed"
+        trace.latency_ms = (time.perf_counter() - stream_start) * 1000.0
+        trace.latency_breakdown = {
+            "criteria_ms": criteria_ms,
+            "stream_ms": trace.latency_ms,
+            "evaluation_ms": evaluation_ms,
+        }
+        trace.memory_influence.update(
+            {
+                "adaptation": adaptation,
+                "decay": decay,
+                "readiness": readiness,
+            }
+        )
+        trace.add_step("request_complete", data={"outcome": trace.outcome})
+
         yield StreamEvent(type="evaluation", data=evaluation)
         yield StreamEvent(type="metrics", data=metrics)
+        yield StreamEvent(type="trace", data=trace)
         yield StreamEvent(
             type="done",
             data=GenerationResponse(
@@ -406,6 +611,7 @@ class Pipeline:
                 evaluation=evaluation,
                 repairs=[],
                 metrics=metrics,
+                trace=trace,
             ),
         )
 
