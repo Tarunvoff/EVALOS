@@ -121,6 +121,7 @@ class Pipeline:
         agent_trace: dict[str, Any] | None = None,
         claim_map: dict[str, str] | None = None,
         claim_dependencies: list[dict[str, Any]] | None = None,
+        criteria_override: list[Criterion] | None = None,
     ) -> GenerationResponse:
         start = time.perf_counter()
         domain_name = domain or self._config.profile
@@ -132,16 +133,24 @@ class Pipeline:
         )
         latency_breakdown: dict[str, float] = {}
         retry_total = 0
-        criteria_start = time.perf_counter()
-        criteria = await self._criteria.generate(query=query, optimize_for=optimize_for)
-        criteria_ms = (time.perf_counter() - criteria_start) * 1000.0
+        criteria_ms = 0.0
+        if criteria_override is None:
+            criteria_start = time.perf_counter()
+            criteria = await self._criteria.generate(query=query, optimize_for=optimize_for)
+            criteria_ms = (time.perf_counter() - criteria_start) * 1000.0
+            trace.add_step(
+                "criteria_generated",
+                data={"criteria_count": len(criteria)},
+                duration_ms=criteria_ms,
+            )
+        else:
+            criteria = criteria_override
+            trace.add_step(
+                "criteria_supplied",
+                data={"criteria_count": len(criteria_override)},
+            )
         latency_breakdown["criteria_ms"] = criteria_ms
         trace.criteria = criteria
-        trace.add_step(
-            "criteria_generated",
-            data={"criteria_count": len(criteria)},
-            duration_ms=criteria_ms,
-        )
         retry_total += self._provider.last_attempts - 1
         strictness_override = self._memory.get_strictness_override(
             model=self._config.model,
@@ -834,6 +843,7 @@ class Pipeline:
         agent_trace: dict[str, Any] | None = None,
         claim_map: dict[str, str] | None = None,
         claim_dependencies: list[dict[str, Any]] | None = None,
+        criteria_override: list[Criterion] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         domain_name = domain or self._config.profile
         trace = Trace.start(
@@ -842,15 +852,23 @@ class Pipeline:
             query=query,
             domain=domain_name,
         )
-        criteria_start = time.perf_counter()
-        criteria = await self._criteria.generate(query=query, optimize_for=optimize_for)
-        criteria_ms = (time.perf_counter() - criteria_start) * 1000.0
+        criteria_ms = 0.0
+        if criteria_override is None:
+            criteria_start = time.perf_counter()
+            criteria = await self._criteria.generate(query=query, optimize_for=optimize_for)
+            criteria_ms = (time.perf_counter() - criteria_start) * 1000.0
+            trace.add_step(
+                "criteria_generated",
+                data={"criteria_count": len(criteria)},
+                duration_ms=criteria_ms,
+            )
+        else:
+            criteria = criteria_override
+            trace.add_step(
+                "criteria_supplied",
+                data={"criteria_count": len(criteria_override)},
+            )
         trace.criteria = criteria
-        trace.add_step(
-            "criteria_generated",
-            data={"criteria_count": len(criteria)},
-            duration_ms=criteria_ms,
-        )
         strictness_override = self._memory.get_strictness_override(
             model=self._config.model,
             domain=domain_name,

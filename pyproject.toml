@@ -21,9 +21,17 @@ dev = [
   "mypy>=1.10.0",
   "types-requests>=2.32.0",
 ]
+bench = [
+  "matplotlib>=3.9.0",
+]
+api = [
+  "fastapi>=0.112.0",
+  "uvicorn>=0.30.0",
+]
 
 [project.scripts]
 evalos = "evalos.cli:app"
+evalos-bench = "evalos.benchmarks.cli:app"
 
 [build-system]
 requires = ["hatchling"]

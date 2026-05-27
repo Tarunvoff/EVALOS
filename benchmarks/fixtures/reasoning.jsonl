@@ -1,0 +1,2 @@
+{"id":"reasoning_001","domain":"Reasoning","prompt":"A server processes 120 requests per minute. If throughput improves by 25% and latency drops by 10%, what is the new requests per minute?","optimize_for":["accuracy","reasoning"],"retrieved_documents":[]}
+{"id":"reasoning_002","domain":"Reasoning","prompt":"Explain why adding more replicas can reduce tail latency in distributed systems, and list two tradeoffs.","optimize_for":["depth","accuracy"],"retrieved_documents":[]}

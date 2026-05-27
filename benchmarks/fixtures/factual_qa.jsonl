@@ -1,0 +1,2 @@
+{"id":"factual_001","domain":"Factual QA","prompt":"What is the capital of Japan and what currency does it use?","optimize_for":["accuracy"],"retrieved_documents":[]}
+{"id":"factual_002","domain":"Factual QA","prompt":"Name the three branches of the United States federal government.","optimize_for":["accuracy"],"retrieved_documents":[]}
