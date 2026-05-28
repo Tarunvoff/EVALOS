@@ -50,6 +50,11 @@ class ProviderRegistry:
 
             provider_cls = LiteLLMProvider
             cls._providers[name] = provider_cls
+        if not provider_cls and name == "ollama":
+            from evalos.providers.ollama import OllamaProvider
+
+            provider_cls = OllamaProvider
+            cls._providers[name] = provider_cls
         if not provider_cls:
             raise ValueError(f"Unknown provider: {name}")
         return provider_cls()

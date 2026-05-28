@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from evalos.api.schemas import (
@@ -26,6 +27,13 @@ from evalos.rag.agent_eval import AgentReliabilityEvaluator
 from evalos.rag.validation import validate_agent_trace
 
 app = FastAPI(title="EvalOS API", version="0.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def _configure_ollama() -> tuple[str, str]:

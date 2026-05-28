@@ -12,18 +12,58 @@
           "last_ts": 1779912013.2345536
         }
       }
+    },
+    "ollama/llama3:latest": {
+      "observations": 2,
+      "evaluations": 1.6,
+      "failed_criteria_total": 3.2,
+      "criteria_total": 6.4,
+      "criterion_failures": {
+        "Drift Distance": {
+          "count": 0.8,
+          "last_ts": 1779962080.2870963
+        },
+        "Grounded Consistency": {
+          "count": 0.8,
+          "last_ts": 1779962080.2871084
+        },
+        "Chain Length Variance": {
+          "count": 0.8,
+          "last_ts": 1779962080.2871137
+        },
+        "Grounding Consistency": {
+          "count": 0.8,
+          "last_ts": 1779995757.4873023
+        }
+      }
     }
   },
   "domain_stats": {
     "general": {
-      "observations": 12,
-      "evaluations": 10.800000000000002,
-      "failed_criteria_total": 7.200000000000001,
-      "criteria_total": 10.800000000000002,
+      "observations": 14,
+      "evaluations": 12.400000000000004,
+      "failed_criteria_total": 10.400000000000002,
+      "criteria_total": 17.200000000000003,
       "criterion_failures": {
         "clarity": {
           "count": 7.200000000000001,
           "last_ts": 1779912013.2345557
+        },
+        "Drift Distance": {
+          "count": 0.8,
+          "last_ts": 1779962080.2871046
+        },
+        "Grounded Consistency": {
+          "count": 0.8,
+          "last_ts": 1779962080.2871113
+        },
+        "Chain Length Variance": {
+          "count": 0.8,
+          "last_ts": 1779962080.287116
+        },
+        "Grounding Consistency": {
+          "count": 0.8,
+          "last_ts": 1779995757.4873102
         }
       }
     }
@@ -44,6 +84,48 @@
       "rollback_count": 0,
       "last_failed_attempt": 0,
       "last_stable_attempt": 1
+    },
+    "s2": {
+      "stable_after_attempt": 0,
+      "rollback_count": 0,
+      "last_failed_attempt": 0,
+      "last_stable_attempt": 0
+    },
+    "s3": {
+      "stable_after_attempt": null,
+      "rollback_count": 0,
+      "last_failed_attempt": null,
+      "last_stable_attempt": null
+    },
+    "s4": {
+      "stable_after_attempt": null,
+      "rollback_count": 0,
+      "last_failed_attempt": 0,
+      "last_stable_attempt": null
+    },
+    "s5": {
+      "stable_after_attempt": null,
+      "rollback_count": 0,
+      "last_failed_attempt": null,
+      "last_stable_attempt": null
+    },
+    "s6": {
+      "stable_after_attempt": null,
+      "rollback_count": 0,
+      "last_failed_attempt": 0,
+      "last_stable_attempt": null
+    },
+    "s7": {
+      "stable_after_attempt": null,
+      "rollback_count": 0,
+      "last_failed_attempt": null,
+      "last_stable_attempt": null
+    },
+    "s8": {
+      "stable_after_attempt": null,
+      "rollback_count": 0,
+      "last_failed_attempt": null,
+      "last_stable_attempt": null
     }
   },
   "threshold_stats": {
@@ -53,6 +135,41 @@
       "avg_score": 0.6333333333333333,
       "failure_count": 7.200000000000001,
       "recommended_threshold": 0.7775
+    },
+    "Drift Distance": {
+      "observations": 1,
+      "sample_count": 0.8,
+      "avg_score": 0.4000000000000001,
+      "failure_count": 0.8,
+      "recommended_threshold": 0.6224999999999999
+    },
+    "Grounded Consistency": {
+      "observations": 1,
+      "sample_count": 0.8,
+      "avg_score": 0.6999999999999998,
+      "failure_count": 0.8,
+      "recommended_threshold": 0.9075000000000001
+    },
+    "Chain Length Variance": {
+      "observations": 1,
+      "sample_count": 0.8,
+      "avg_score": 0.6,
+      "failure_count": 0.8,
+      "recommended_threshold": 0.98
+    },
+    "Agent Agreement": {
+      "observations": 1,
+      "sample_count": 0.8,
+      "avg_score": 0.8000000000000002,
+      "failure_count": 0.0,
+      "recommended_threshold": 0.6024999999999999
+    },
+    "Grounding Consistency": {
+      "observations": 1,
+      "sample_count": 0.8,
+      "avg_score": 0.6,
+      "failure_count": 0.8,
+      "recommended_threshold": 0.8124999999999999
     }
   },
   "threshold_history": {
@@ -69,6 +186,21 @@
       0.7814999999999999,
       0.7738636363636363,
       0.7775
+    ],
+    "Drift Distance": [
+      0.6224999999999999
+    ],
+    "Grounded Consistency": [
+      0.9075000000000001
+    ],
+    "Chain Length Variance": [
+      0.98
+    ],
+    "Agent Agreement": [
+      0.6024999999999999
+    ],
+    "Grounding Consistency": [
+      0.8124999999999999
     ]
   },
   "rag_model_stats": {},

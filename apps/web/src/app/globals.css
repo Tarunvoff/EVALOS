@@ -1,0 +1,48 @@
+@import "tailwindcss";
+
+:root {
+  --background: #070a11;
+  --foreground: #e8edf6;
+  --surface: rgba(17, 23, 35, 0.82);
+  --surface-strong: rgba(18, 27, 42, 0.92);
+  --accent: #2fd4b6;
+  --accent-2: #f6c36b;
+  --stroke: rgba(255, 255, 255, 0.08);
+  --glow: rgba(47, 212, 182, 0.35);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-space-grotesk);
+  --font-mono: var(--font-jetbrains-mono);
+}
+
+body {
+  background: radial-gradient(circle at top, rgba(30, 45, 70, 0.5), transparent 55%),
+    radial-gradient(circle at 20% 20%, rgba(47, 212, 182, 0.25), transparent 40%),
+    radial-gradient(circle at 80% 10%, rgba(246, 195, 107, 0.22), transparent 45%),
+    var(--background);
+  color: var(--foreground);
+  font-family: var(--font-space-grotesk), system-ui, sans-serif;
+}
+
+.bg-grid {
+  background-image: linear-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+  background-size: 40px 40px;
+  background-position: -1px -1px;
+}
+
+.glass-panel {
+  border: 1px solid var(--stroke);
+  background: var(--surface);
+  box-shadow: 0 10px 30px rgba(7, 10, 17, 0.6), 0 0 40px rgba(47, 212, 182, 0.08);
+  backdrop-filter: blur(18px);
+  border-radius: 20px;
+  padding: 20px;
+}
+
+.shadow-glow {
+  box-shadow: 0 0 30px var(--glow);
+}
