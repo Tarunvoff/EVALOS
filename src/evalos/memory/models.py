@@ -67,6 +67,12 @@ class ThresholdStats(BaseModel):
     recommended_threshold: float | None = None
 
 
+class RepairOutcomeStats(BaseModel):
+    attempts: float = 0.0
+    successes: float = 0.0
+    last_ts: float | None = None
+
+
 class RagModelStats(BaseModel):
     observations: int = 0
     hallucination_count: float = 0.0
@@ -94,3 +100,7 @@ class MemoryState(BaseModel):
     threshold_history: dict[str, list[float]] = Field(default_factory=dict)
     rag_model_stats: dict[str, RagModelStats] = Field(default_factory=dict)
     rag_domain_stats: dict[str, RagDomainStats] = Field(default_factory=dict)
+    failure_type_stats: dict[str, FailureStats] = Field(default_factory=dict)
+    model_failure_type_stats: dict[str, dict[str, FailureStats]] = Field(default_factory=dict)
+    failure_type_repair_stats: dict[str, RepairOutcomeStats] = Field(default_factory=dict)
+    model_repair_stats: dict[str, RepairOutcomeStats] = Field(default_factory=dict)

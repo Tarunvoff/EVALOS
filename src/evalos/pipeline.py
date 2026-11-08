@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import time
 from collections.abc import AsyncIterator
+from statistics import mean, stdev
 from typing import Any
 
+import difflib
 import structlog
 
 from evalos.config import PipelineConfig, RetryConfig
@@ -29,10 +31,13 @@ from evalos.rag.schema import Provenance
 from evalos.rag.retriever import CitationMapping, normalize_documents
 from evalos.rag.validation import validate_agent_trace, validate_citations
 from evalos.types import (
+    Criterion,
     EvaluationResult,
     GenerationResponse,
     Metrics,
+    RepairDelta,
     RepairRecord,
+    Section,
     StreamEvent,
     Usage,
 )
@@ -520,18 +525,34 @@ class Pipeline:
             }
 
         evaluation_start = time.perf_counter()
-        evaluation = await self._evaluator.evaluate(
-            query=query,
-            response_text=rag_text,
-            criteria=criteria,
-            strictness_override=strictness_override,
-            threshold_overrides=threshold_overrides,
-            weight_overrides=weight_overrides,
+        evaluation, consensus_score, evaluator_disagreement, criterion_scores = (
+            await self._evaluate_with_ensemble(
+                query=query,
+                response_text=rag_text,
+                criteria=criteria,
+                strictness_override=strictness_override,
+                threshold_overrides=threshold_overrides,
+                weight_overrides=weight_overrides,
+            )
         )
+        criterion_confidence = _compute_criterion_confidence(
+            criteria=criteria,
+            criterion_scores=criterion_scores,
+            memory=self._memory,
+            domain=domain_name,
+            grounding_score=rag_grounding.grounding_score if rag_grounding else None,
+            citation_accuracy=rag_citation.citation_accuracy_score if rag_citation else None,
+        )
+        evaluation = _apply_confidence_weighting(evaluation, criterion_confidence)
         evaluation_ms = (time.perf_counter() - evaluation_start) * 1000.0
         latency_breakdown["evaluation_ms"] = evaluation_ms
         retry_total += self._provider.last_attempts - 1
         quality_before = evaluation.weighted_score
+        failure_distribution = _failure_distribution(evaluation)
+        self._memory.record_failure_types(
+            model=self._config.model,
+            failure_types=list(failure_distribution.keys()),
+        )
         trace.evaluation = evaluation
         trace.add_step(
             "evaluation",
@@ -567,11 +588,24 @@ class Pipeline:
         rollback_count = 0
         rollback_events: list[RollbackEvent] = []
         repair_overrides: list[dict[str, object]] = []
+        score_history: list[float] = [current_eval.weighted_score]
+        repair_budget_remaining = self._config.repair_budget
+        memory_frozen = False
+        effective_max_edit_ratio = self._config.max_edit_distance_ratio
+        min_repair_improvement = self._config.min_repair_improvement
+        oscillation_index = 0.0
+        trust_region_violation_count = 0
 
         for attempt in range(1, self._config.max_repairs + 1):
             if current_eval.passed:
                 break
             if self._config.repair_strategy != "selective":
+                break
+            if repair_budget_remaining <= 0:
+                trace.add_step(
+                    "repair_budget_exhausted",
+                    data={"budget": repair_budget_remaining},
+                )
                 break
             failed_sections_now = _collect_failed_sections(current_eval)
             stable_sections = self._memory.get_stable_sections(
@@ -580,7 +614,9 @@ class Pipeline:
             locked_sections.update(
                 [section_id for section_id in stable_sections if section_id not in failed_sections_now]
             )
-            strategy_overrides = self._memory.get_strategy_overrides(current_eval.failed)
+            strategy_overrides = (
+                {} if memory_frozen else self._memory.get_strategy_overrides(current_eval.failed)
+            )
             if strategy_overrides:
                 repair_overrides.append(
                     {
@@ -591,15 +627,29 @@ class Pipeline:
                 )
 
             repair_start = time.perf_counter()
-            repaired, deltas, strategies, failed_sections, repair_tokens = await self._repair.repair(
+            evaluation_for_repair = _filter_low_confidence_results(
+                current_eval, self._config.min_criterion_confidence
+            )
+            repaired, deltas, strategies, failed_sections, repair_tokens, edit_ratio, trust_region_violation = await self._repair.repair(
                 query=query,
                 response_text=current_text,
-                evaluation=current_eval,
+                evaluation=evaluation_for_repair,
                 criteria=criteria,
                 sections=current_eval.sections,
                 locked_sections=locked_sections,
                 strategy_overrides=strategy_overrides,
+                max_edit_distance_ratio=effective_max_edit_ratio,
             )
+            if trust_region_violation:
+                trust_region_violation_count += 1
+                trace.add_step(
+                    "trust_region_violation",
+                    data={
+                        "attempt": attempt,
+                        "edit_distance_ratio": edit_ratio,
+                        "threshold": effective_max_edit_ratio,
+                    },
+                )
             repair_ms = (time.perf_counter() - repair_start) * 1000.0
             latency_breakdown["repair_ms"] = latency_breakdown.get("repair_ms", 0.0) + repair_ms
             retry_total += self._provider.last_attempts - 1
@@ -611,19 +661,43 @@ class Pipeline:
                     "strategies": strategies,
                     "failed_sections": failed_sections,
                     "repair_tokens": repair_tokens,
+                    "edit_distance_ratio": edit_ratio,
                 },
                 duration_ms=repair_ms,
             )
 
-            reevaluate_start = time.perf_counter()
-            new_eval = await self._evaluator.evaluate(
-                query=query,
-                response_text=repaired,
-                criteria=criteria,
-                strictness_override=strictness_override,
-                threshold_overrides=threshold_overrides,
-                weight_overrides=weight_overrides,
+            repair_cost = _repair_cost(
+                base_text=current_text,
+                sections=current_eval.sections,
+                deltas=deltas,
             )
+            repair_budget_remaining = max(0, repair_budget_remaining - repair_cost)
+
+            reevaluate_start = time.perf_counter()
+            eval_strictness = (
+                self._config.evaluation_strictness if memory_frozen else strictness_override
+            )
+            eval_thresholds = {} if memory_frozen else threshold_overrides
+            eval_weights = {} if memory_frozen else weight_overrides
+            new_eval, consensus_score, evaluator_disagreement, criterion_scores = (
+                await self._evaluate_with_ensemble(
+                    query=query,
+                    response_text=repaired,
+                    criteria=criteria,
+                    strictness_override=eval_strictness,
+                    threshold_overrides=eval_thresholds,
+                    weight_overrides=eval_weights,
+                )
+            )
+            criterion_confidence = _compute_criterion_confidence(
+                criteria=criteria,
+                criterion_scores=criterion_scores,
+                memory=self._memory,
+                domain=domain_name,
+                grounding_score=rag_grounding.grounding_score if rag_grounding else None,
+                citation_accuracy=rag_citation.citation_accuracy_score if rag_citation else None,
+            )
+            new_eval = _apply_confidence_weighting(new_eval, criterion_confidence)
             reevaluate_ms = (time.perf_counter() - reevaluate_start) * 1000.0
             latency_breakdown["reevaluation_ms"] = latency_breakdown.get("reevaluation_ms", 0.0) + reevaluate_ms
             retry_total += self._provider.last_attempts - 1
@@ -634,9 +708,40 @@ class Pipeline:
                     "score": new_eval.weighted_score,
                     "passed": new_eval.passed,
                     "failed": new_eval.failed,
+                    "consensus_score": consensus_score,
+                    "evaluator_disagreement": evaluator_disagreement,
                 },
                 duration_ms=reevaluate_ms,
             )
+
+            score_history.append(new_eval.weighted_score)
+            oscillation_index = _oscillation_index(score_history)
+            if oscillation_index >= self._config.oscillation_threshold:
+                memory_frozen = True
+                effective_max_edit_ratio = (
+                    min(effective_max_edit_ratio, 0.1)
+                    if effective_max_edit_ratio is not None
+                    else 0.1
+                )
+                min_repair_improvement = max(min_repair_improvement, 0.01)
+                trace.add_step(
+                    "oscillation_damping",
+                    data={
+                        "oscillation_index": oscillation_index,
+                        "edit_ratio_cap": effective_max_edit_ratio,
+                        "min_improvement": min_repair_improvement,
+                    },
+                )
+
+            if evaluator_disagreement > self._config.evaluator_disagreement_threshold:
+                trace.add_step(
+                    "evaluation_unstable",
+                    data={
+                        "evaluator_disagreement": evaluator_disagreement,
+                        "threshold": self._config.evaluator_disagreement_threshold,
+                    },
+                )
+                break
 
             if new_eval.weighted_score < current_eval.weighted_score:
                 self._logger.info(
@@ -676,6 +781,18 @@ class Pipeline:
                 )
                 break
 
+            if new_eval.weighted_score < current_eval.weighted_score + min_repair_improvement:
+                trace.add_step(
+                    "repair_rejected_low_gain",
+                    data={
+                        "attempt": attempt,
+                        "score_before": current_eval.weighted_score,
+                        "score_after": new_eval.weighted_score,
+                        "min_improvement": min_repair_improvement,
+                    },
+                )
+                break
+
             locked_sections.update(failed_sections)
             success = new_eval.passed or (
                 len(new_eval.failed) < len(current_eval.failed)
@@ -685,6 +802,13 @@ class Pipeline:
             repair_weight = _evaluation_confidence(new_eval) * stability_score
             await self._memory.arecord_repair(
                 strategies=strategies,
+                success=success,
+                weight=repair_weight,
+            )
+            failure_distribution = _failure_distribution(current_eval)
+            self._memory.record_repair_outcome(
+                model=self._config.model,
+                failure_types=list(failure_distribution.keys()),
                 success=success,
                 weight=repair_weight,
             )
@@ -749,6 +873,18 @@ class Pipeline:
             model=self._config.model, domain=domain_name
         )
         threshold_drift = _threshold_drift(criteria, threshold_overrides)
+        quality_velocity = _quality_velocity(score_history)
+        quality_acceleration = _quality_acceleration(score_history)
+        repair_success_by_failure = self._memory.get_repair_success_rate_by_failure_type()
+        repair_success_by_model = self._memory.get_repair_success_rate_by_model()
+        repair_success_rate = repair_success_by_model.get(self._config.model, 0.0)
+        reliability_score = _reliability_score(
+            stability_score=_stability_index(score_history),
+            consensus_score=consensus_score,
+            repair_success_rate=repair_success_rate,
+            oscillation_index=oscillation_index,
+            memory_confidence=_evaluation_confidence(current_eval),
+        )
         metrics = Metrics(
             provider=self._config.provider,
             model=self._config.model,
@@ -794,6 +930,16 @@ class Pipeline:
             reasoning_consistency_score=rag_agent.reasoning_consistency_score if rag_agent else 0.0,
             retrieval_alignment_score=rag_grounding.grounding_score if rag_grounding else 0.0,
             rag_repair_gain=rag_repair_gain,
+            quality_velocity=quality_velocity,
+            quality_acceleration=quality_acceleration,
+            oscillation_index=oscillation_index,
+            repair_budget_remaining=repair_budget_remaining,
+            consensus_score=consensus_score,
+            evaluator_disagreement=evaluator_disagreement,
+            failure_distribution=failure_distribution,
+            repair_success_rate_by_failure_type=repair_success_by_failure,
+            repair_success_rate_by_model=repair_success_by_model,
+            reliability_score=reliability_score,
         )
 
         trace.repairs = repairs
@@ -1164,14 +1310,25 @@ class Pipeline:
             }
 
         evaluation_start = time.perf_counter()
-        evaluation = await self._evaluator.evaluate(
-            query=query,
-            response_text=rag_text,
-            criteria=criteria,
-            strictness_override=strictness_override,
-            threshold_overrides=threshold_overrides,
-            weight_overrides=weight_overrides,
+        evaluation, consensus_score, evaluator_disagreement, criterion_scores = (
+            await self._evaluate_with_ensemble(
+                query=query,
+                response_text=rag_text,
+                criteria=criteria,
+                strictness_override=strictness_override,
+                threshold_overrides=threshold_overrides,
+                weight_overrides=weight_overrides,
+            )
         )
+        criterion_confidence = _compute_criterion_confidence(
+            criteria=criteria,
+            criterion_scores=criterion_scores,
+            memory=self._memory,
+            domain=domain_name,
+            grounding_score=rag_grounding.grounding_score if rag_grounding else None,
+            citation_accuracy=rag_citation.citation_accuracy_score if rag_citation else None,
+        )
+        evaluation = _apply_confidence_weighting(evaluation, criterion_confidence)
         evaluation_ms = (time.perf_counter() - evaluation_start) * 1000.0
         trace.evaluation = evaluation
         trace.add_step(
@@ -1182,6 +1339,11 @@ class Pipeline:
                 "failed": evaluation.failed,
             },
             duration_ms=evaluation_ms,
+        )
+        failure_distribution = _failure_distribution(evaluation)
+        self._memory.record_failure_types(
+            model=self._config.model,
+            failure_types=list(failure_distribution.keys()),
         )
         await self._memory.arecord_evaluation(
             model=self._config.model,
@@ -1199,6 +1361,16 @@ class Pipeline:
         decay = self._memory.get_decay_analytics(model=self._config.model, domain=domain_name)
         readiness = self._memory.get_adaptation_readiness(
             model=self._config.model, domain=domain_name
+        )
+        repair_success_by_failure = self._memory.get_repair_success_rate_by_failure_type()
+        repair_success_by_model = self._memory.get_repair_success_rate_by_model()
+        repair_success_rate = repair_success_by_model.get(self._config.model, 0.0)
+        reliability_score = _reliability_score(
+            stability_score=_stability_index([evaluation.weighted_score]),
+            consensus_score=consensus_score,
+            repair_success_rate=repair_success_rate,
+            oscillation_index=0.0,
+            memory_confidence=_evaluation_confidence(evaluation),
         )
         metrics = Metrics(
             provider=self._config.provider,
@@ -1237,6 +1409,16 @@ class Pipeline:
             reasoning_consistency_score=rag_agent.reasoning_consistency_score if rag_agent else 0.0,
             retrieval_alignment_score=rag_grounding.grounding_score if rag_grounding else 0.0,
             rag_repair_gain=rag_repair_gain,
+            quality_velocity=0.0,
+            quality_acceleration=0.0,
+            oscillation_index=0.0,
+            repair_budget_remaining=self._config.repair_budget,
+            consensus_score=consensus_score,
+            evaluator_disagreement=evaluator_disagreement,
+            failure_distribution=failure_distribution,
+            repair_success_rate_by_failure_type=repair_success_by_failure,
+            repair_success_rate_by_model=repair_success_by_model,
+            reliability_score=reliability_score,
         )
 
         trace.final_text = rag_text
@@ -1281,6 +1463,48 @@ class Pipeline:
 
     def _generation_model(self) -> str:
         return self._config.generation_model or self._config.model
+
+    async def _evaluate_with_ensemble(
+        self,
+        *,
+        query: str,
+        response_text: str,
+        criteria: list[Criterion],
+        strictness_override: str | None,
+        threshold_overrides: dict[str, float] | None,
+        weight_overrides: dict[str, float] | None,
+    ) -> tuple[EvaluationResult, float, float, dict[str, list[float]]]:
+        primary = await self._evaluator.evaluate(
+            query=query,
+            response_text=response_text,
+            criteria=criteria,
+            strictness_override=strictness_override,
+            threshold_overrides=threshold_overrides,
+            weight_overrides=weight_overrides,
+        )
+        if not self._config.ensemble_enabled:
+            return primary, primary.weighted_score, 0.0, {}
+        secondary = await self._evaluator.evaluate(
+            query=query,
+            response_text=response_text,
+            criteria=criteria,
+            strictness_override=self._config.evaluation_strictness,
+            threshold_overrides=threshold_overrides,
+            weight_overrides=weight_overrides,
+        )
+        adversarial = await self._evaluator.evaluate(
+            query=query,
+            response_text=response_text,
+            criteria=criteria,
+            strictness_override="adversarial",
+            threshold_overrides=threshold_overrides,
+            weight_overrides=weight_overrides,
+        )
+        scores = [primary.weighted_score, secondary.weighted_score, adversarial.weighted_score]
+        consensus_score = sum(scores) / max(1, len(scores))
+        evaluator_disagreement = max(scores) - min(scores)
+        criterion_scores = _collect_criterion_scores([primary, secondary, adversarial])
+        return primary, consensus_score, evaluator_disagreement, criterion_scores
 
 
 def _extract_text_and_usage(response: dict) -> tuple[str, Usage]:
@@ -1395,3 +1619,153 @@ def _rag_doc_summaries(documents: list) -> list[dict[str, Any]]:
             }
         )
     return summaries
+
+
+def _collect_criterion_scores(evaluations: list[EvaluationResult]) -> dict[str, list[float]]:
+    criterion_scores: dict[str, list[float]] = {}
+    for ev in evaluations:
+        if ev and ev.results:
+            for result in ev.results:
+                criterion_scores.setdefault(result.name, []).append(float(result.score))
+    return criterion_scores
+
+
+def _compute_criterion_confidence(
+    *,
+    criteria: list[Criterion],
+    criterion_scores: dict[str, list[float]],
+    memory: Any = None,
+    domain: str = "general",
+    grounding_score: float | None = None,
+    citation_accuracy: float | None = None,
+) -> dict[str, float]:
+    confidences: dict[str, float] = {}
+    for crit in criteria:
+        scores = criterion_scores.get(crit.name, [])
+        if scores and len(scores) > 1:
+            disagreement = max(scores) - min(scores)
+            base_conf = max(0.0, min(1.0, 1.0 - disagreement))
+        else:
+            base_conf = 0.85
+
+        if grounding_score is not None and any(
+            k in crit.name.lower() for k in ("ground", "fact", "accuracy")
+        ):
+            base_conf = 0.5 * base_conf + 0.5 * grounding_score
+        if citation_accuracy is not None and "citation" in crit.name.lower():
+            base_conf = 0.5 * base_conf + 0.5 * citation_accuracy
+
+        confidences[crit.name] = max(0.0, min(1.0, base_conf))
+    return confidences
+
+
+def _apply_confidence_weighting(
+    evaluation: EvaluationResult,
+    criterion_confidence: dict[str, float],
+) -> EvaluationResult:
+    for res in evaluation.results:
+        if res.name in criterion_confidence:
+            conf = criterion_confidence[res.name]
+            res.criterion_confidence = conf
+            res.confidence = min(res.confidence, conf)
+    return evaluation
+
+
+def _filter_low_confidence_results(
+    evaluation: EvaluationResult,
+    min_confidence: float,
+) -> EvaluationResult:
+    filtered_results = [
+        res
+        for res in evaluation.results
+        if getattr(res, "criterion_confidence", res.confidence) >= min_confidence
+    ]
+    failed = [res.name for res in filtered_results if not res.passed]
+    pass_rate = (
+        len([r for r in filtered_results if r.passed]) / max(1, len(filtered_results))
+        if filtered_results
+        else evaluation.pass_rate
+    )
+    return EvaluationResult(
+        results=filtered_results,
+        passed=len(failed) == 0,
+        failed=failed,
+        weighted_score=evaluation.weighted_score,
+        pass_rate=pass_rate,
+        sections=evaluation.sections,
+    )
+
+
+def _failure_distribution(evaluation: EvaluationResult) -> dict[str, int]:
+    distribution: dict[str, int] = {}
+    for res in evaluation.results:
+        if not res.passed:
+            distribution[res.name] = distribution.get(res.name, 0) + 1
+    return distribution
+
+
+def _repair_cost(
+    *,
+    base_text: str = "",
+    sections: list[Section] | None = None,
+    deltas: list[RepairDelta] | None = None,
+) -> int:
+    if not deltas:
+        return 0
+    cost = 0
+    for delta in deltas:
+        words = len(delta.revised_text.split())
+        cost += max(1, words)
+    return max(len(deltas), cost)
+
+
+def _oscillation_index(score_history: list[float]) -> float:
+    if len(score_history) < 3:
+        return 0.0
+    diffs = [score_history[i + 1] - score_history[i] for i in range(len(score_history) - 1)]
+    sign_flips = sum(
+        1
+        for i in range(len(diffs) - 1)
+        if (diffs[i] > 0 and diffs[i + 1] < 0) or (diffs[i] < 0 and diffs[i + 1] > 0)
+    )
+    return float(sign_flips) / max(1, len(diffs) - 1)
+
+
+def _quality_velocity(score_history: list[float]) -> float:
+    if len(score_history) < 2:
+        return 0.0
+    return (score_history[-1] - score_history[0]) / max(1, len(score_history) - 1)
+
+
+def _quality_acceleration(score_history: list[float]) -> float:
+    if len(score_history) < 3:
+        return 0.0
+    v2 = score_history[-1] - score_history[-2]
+    v1 = score_history[-2] - score_history[-3]
+    return v2 - v1
+
+
+def _stability_index(score_history: list[float]) -> float:
+    if len(score_history) <= 1:
+        return 1.0
+    diffs = [abs(score_history[i + 1] - score_history[i]) for i in range(len(score_history) - 1)]
+    avg_diff = sum(diffs) / len(diffs)
+    return max(0.0, min(1.0, 1.0 - avg_diff))
+
+
+def _reliability_score(
+    *,
+    stability_score: float,
+    consensus_score: float,
+    repair_success_rate: float,
+    oscillation_index: float,
+    memory_confidence: float,
+) -> float:
+    score = (
+        0.35 * consensus_score
+        + 0.25 * stability_score
+        + 0.20 * memory_confidence
+        + 0.20 * repair_success_rate
+        - 0.20 * oscillation_index
+    )
+    return max(0.0, min(1.0, score))

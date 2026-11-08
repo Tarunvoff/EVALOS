@@ -2,14 +2,14 @@
   "memory_version": 2,
   "model_stats": {
     "test": {
-      "observations": 12,
-      "evaluations": 10.800000000000002,
-      "failed_criteria_total": 7.200000000000001,
-      "criteria_total": 10.800000000000002,
+      "observations": 31,
+      "evaluations": 27.899999999999984,
+      "failed_criteria_total": 19.799999999999997,
+      "criteria_total": 27.899999999999984,
       "criterion_failures": {
         "clarity": {
-          "count": 7.200000000000001,
-          "last_ts": 1779912013.2345536
+          "count": 19.799999999999997,
+          "last_ts": 1794166914.3082752
         }
       }
     },
@@ -40,14 +40,14 @@
   },
   "domain_stats": {
     "general": {
-      "observations": 14,
-      "evaluations": 12.400000000000004,
-      "failed_criteria_total": 10.400000000000002,
-      "criteria_total": 17.200000000000003,
+      "observations": 33,
+      "evaluations": 29.499999999999982,
+      "failed_criteria_total": 22.999999999999993,
+      "criteria_total": 34.299999999999976,
       "criterion_failures": {
         "clarity": {
-          "count": 7.200000000000001,
-          "last_ts": 1779912013.2345557
+          "count": 19.799999999999997,
+          "last_ts": 1794166914.308279
         },
         "Drift Distance": {
           "count": 0.8,
@@ -70,12 +70,12 @@
   },
   "repair_stats": {
     "simplify wording and structure": {
-      "observations": 4,
-      "attempts": 3.6,
-      "successes": 3.6,
+      "observations": 9,
+      "attempts": 8.100000000000001,
+      "successes": 8.100000000000001,
       "success_rate": 1.0,
-      "last_success_ts": 1779912013.219422,
-      "last_attempt_ts": 1779912013.2194211
+      "last_success_ts": 1794166914.2895246,
+      "last_attempt_ts": 1794166914.2895236
     }
   },
   "section_stats": {
@@ -130,11 +130,11 @@
   },
   "threshold_stats": {
     "clarity": {
-      "observations": 12,
-      "sample_count": 10.800000000000002,
-      "avg_score": 0.6333333333333333,
-      "failure_count": 7.200000000000001,
-      "recommended_threshold": 0.7775
+      "observations": 31,
+      "sample_count": 27.899999999999984,
+      "avg_score": 0.6161290322580649,
+      "failure_count": 19.799999999999997,
+      "recommended_threshold": 0.7826612903225807
     },
     "Drift Distance": {
       "observations": 1,
@@ -174,18 +174,31 @@
   },
   "threshold_history": {
     "clarity": [
-      0.8174999999999999,
-      0.7575,
-      0.7775,
-      0.7874999999999999,
-      0.7695,
-      0.7775,
       0.7832142857142856,
       0.7725,
       0.7775,
       0.7814999999999999,
       0.7738636363636363,
-      0.7775
+      0.7775,
+      0.7805769230769231,
+      0.7832142857142856,
+      0.7855,
+      0.7874999999999999,
+      0.789264705882353,
+      0.7841666666666666,
+      0.785921052631579,
+      0.7875,
+      0.7832142857142856,
+      0.7847727272727273,
+      0.786195652173913,
+      0.7825000000000001,
+      0.7839,
+      0.7851923076923077,
+      0.7819444444444444,
+      0.7832142857142858,
+      0.7843965517241379,
+      0.7815,
+      0.7826612903225807
     ],
     "Drift Distance": [
       0.6224999999999999
@@ -204,5 +217,33 @@
     ]
   },
   "rag_model_stats": {},
-  "rag_domain_stats": {}
+  "rag_domain_stats": {},
+  "failure_type_stats": {
+    "clarity": {
+      "count": 14.0,
+      "last_ts": 1794166914.3073912
+    }
+  },
+  "model_failure_type_stats": {
+    "test": {
+      "clarity": {
+        "count": 14.0,
+        "last_ts": 1794166914.3073936
+      }
+    }
+  },
+  "failure_type_repair_stats": {
+    "clarity": {
+      "attempts": 4.5,
+      "successes": 4.5,
+      "last_ts": 1794166914.2908938
+    }
+  },
+  "model_repair_stats": {
+    "test": {
+      "attempts": 4.5,
+      "successes": 4.5,
+      "last_ts": 1794166914.2908878
+    }
+  }
 }

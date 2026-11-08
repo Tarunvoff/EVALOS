@@ -54,6 +54,7 @@ class CriterionResult(BaseModel):
     severity: Severity = "medium"
     threshold: float = 0.7
     confidence: float = Field(default=0.8, ge=0.0, le=1.0)
+    criterion_confidence: float = Field(default=0.8, ge=0.0, le=1.0)
     reason: str | None = None
     affected_section: str | None = None
     suggested_strategy: str | None = None
@@ -126,6 +127,16 @@ class Metrics(BaseModel):
     reasoning_consistency_score: float = 0.0
     retrieval_alignment_score: float = 0.0
     rag_repair_gain: float = 0.0
+    quality_velocity: float = 0.0
+    quality_acceleration: float = 0.0
+    oscillation_index: float = 0.0
+    repair_budget_remaining: int = 0
+    consensus_score: float = 0.0
+    evaluator_disagreement: float = 0.0
+    failure_distribution: dict[str, int] = Field(default_factory=dict)
+    repair_success_rate_by_failure_type: dict[str, float] = Field(default_factory=dict)
+    repair_success_rate_by_model: dict[str, float] = Field(default_factory=dict)
+    reliability_score: float = 0.0
 
 
 class RepairDelta(BaseModel):

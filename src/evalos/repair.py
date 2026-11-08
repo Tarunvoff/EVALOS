@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import json
 
 from pydantic import TypeAdapter
@@ -34,7 +35,9 @@ class RepairEngine:
         sections: list[Section],
         locked_sections: set[str] | None = None,
         strategy_overrides: dict[str, str] | None = None,
-    ) -> tuple[str, list[RepairDelta], list[str], list[str], int]:
+        max_edit_distance_ratio: float | None = None,
+        localized_retry: bool = True,
+    ) -> tuple[str, list[RepairDelta], list[str], list[str], int, float, bool]:
         failed = evaluation.failed
         prompt = self._build_prompt(
             query,
@@ -45,6 +48,8 @@ class RepairEngine:
             evaluation,
             locked_sections,
             strategy_overrides,
+            max_edit_distance_ratio=max_edit_distance_ratio,
+            localized_only=False,
         )
         messages = [
             {"role": "system", "content": "You repair only failed criteria."},
@@ -62,9 +67,56 @@ class RepairEngine:
             payload = extract_json(content)
             deltas = _normalize_deltas(payload)
             repaired = _apply_deltas(sections, deltas)
+            edit_ratio = _edit_distance_ratio(response_text, repaired)
+            trust_region_violation = (
+                max_edit_distance_ratio is not None
+                and edit_ratio > max_edit_distance_ratio
+            )
+            if trust_region_violation and localized_retry:
+                localized_prompt = self._build_prompt(
+                    query,
+                    response_text,
+                    failed,
+                    criteria,
+                    sections,
+                    evaluation,
+                    locked_sections,
+                    strategy_overrides,
+                    max_edit_distance_ratio=max_edit_distance_ratio,
+                    localized_only=True,
+                )
+                localized_messages = [
+                    {"role": "system", "content": "You repair only failed criteria."},
+                    {"role": "user", "content": localized_prompt},
+                ]
+                response = await self._provider.generate(
+                    model=self._config.repair_model or self._config.model,
+                    messages=localized_messages,
+                )
+                content = response["choices"][0]["message"]["content"]
+                usage = response.get("usage") or {}
+                repair_tokens = int(usage.get("total_tokens", 0))
+                payload = extract_json(content)
+                deltas = _normalize_deltas(payload)
+                repaired = _apply_deltas(sections, deltas)
+                edit_ratio = _edit_distance_ratio(response_text, repaired)
+                trust_region_violation = (
+                    max_edit_distance_ratio is not None
+                    and edit_ratio > max_edit_distance_ratio
+                )
+
+
             strategies = [delta.strategy for delta in deltas]
             failed_sections = sorted({delta.section_id for delta in deltas})
-            return repaired, deltas, strategies, failed_sections, repair_tokens
+            return (
+                repaired,
+                deltas,
+                strategies,
+                failed_sections,
+                repair_tokens,
+                edit_ratio,
+                trust_region_violation,
+            )
         except Exception as exc:
             raise RepairError("Repair failed") from exc
 
@@ -78,6 +130,8 @@ class RepairEngine:
         evaluation: EvaluationResult,
         locked_sections: set[str] | None = None,
         strategy_overrides: dict[str, str] | None = None,
+        max_edit_distance_ratio: float | None = None,
+        localized_only: bool = False,
     ) -> str:
         instructions = []
         for result in evaluation.results:
@@ -110,14 +164,18 @@ class RepairEngine:
             ),
             "instruction": "Repair ONLY failed criteria using minimal edits. Preserve all other content.",
         }
+        if max_edit_distance_ratio is not None:
+            payload["max_edit_distance_ratio"] = max_edit_distance_ratio
         if locked_list:
             payload["locked_sections"] = locked_list
-            
+        localized_note = " Keep edits localized and avoid broad rewrites." if localized_only else ""
         return (
             "Return ONLY deltas for the affected sections. "
             "Do not rewrite unaffected sections. "
             "Do NOT modify any sections listed in locked_sections. "
-            "Keep edits minimal while improving failed criteria. "
+            "Keep edits minimal while improving failed criteria."
+            f"{localized_note} "
+            "Edits must respect max_edit_distance_ratio when provided. "
             "Return ONLY JSON.\n\n"
             f"{json.dumps(payload, ensure_ascii=True)}"
         )
@@ -151,3 +209,13 @@ def _normalize_deltas(payload: object) -> list[RepairDelta]:
         ]
         return adapter.validate_python(transformed)
     return adapter.validate_python(payload)
+
+
+def _edit_distance_ratio(before: str, after: str) -> float:
+    if not before and not after:
+        return 0.0
+    if not before:
+        return 1.0
+    matcher = difflib.SequenceMatcher(None, before, after)
+    similarity = matcher.ratio()
+    return max(0.0, min(1.0, 1.0 - similarity))

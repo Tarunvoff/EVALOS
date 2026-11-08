@@ -16,6 +16,7 @@ from evalos.memory.models import (
     ModelStats,
     RagDomainStats,
     RagModelStats,
+    RepairOutcomeStats,
     RepairStrategyStats,
     SectionStabilityStats,
     ThresholdStats,
@@ -128,6 +129,13 @@ class Memory:
         success_rate = decayed_successes / max(1e-6, decayed_attempts)
         return decayed_attempts, decayed_successes, success_rate
 
+    def _decayed_outcomes(self, stats: RepairOutcomeStats) -> tuple[float, float, float]:
+        factor = self._decay_factor(stats.last_ts, self._config.repair_decay_lambda)
+        decayed_attempts = stats.attempts * factor
+        decayed_successes = stats.successes * factor
+        success_rate = decayed_successes / max(1e-6, decayed_attempts)
+        return decayed_attempts, decayed_successes, success_rate
+
     def _cap_delta(self, base: float, target: float, max_delta: float) -> float:
         delta = target - base
         if delta > max_delta:
@@ -156,6 +164,46 @@ class Memory:
             stats.count += 1.0
             stats.last_ts = self._now()
         model_stats.failed_criteria_total += float(len(failed_criteria))
+        if self._config.autosave:
+            self._storage.save_sync(self._state)
+
+    def record_failure_types(self, *, model: str, failure_types: list[str]) -> None:
+        if not failure_types:
+            return
+        for failure_type in failure_types:
+            stats = self._state.failure_type_stats.setdefault(failure_type, FailureStats())
+            stats.count += 1.0
+            stats.last_ts = self._now()
+            model_bucket = self._state.model_failure_type_stats.setdefault(model, {})
+            model_stats = model_bucket.setdefault(failure_type, FailureStats())
+            model_stats.count += 1.0
+            model_stats.last_ts = self._now()
+        if self._config.autosave:
+            self._storage.save_sync(self._state)
+
+    def record_repair_outcome(
+        self,
+        *,
+        model: str,
+        failure_types: list[str],
+        success: bool,
+        weight: float = 1.0,
+    ) -> None:
+        if weight <= 0.0:
+            return
+        model_stats = self._state.model_repair_stats.setdefault(model, RepairOutcomeStats())
+        model_stats.attempts += weight
+        if success:
+            model_stats.successes += weight
+        model_stats.last_ts = self._now()
+        for failure_type in failure_types:
+            stats = self._state.failure_type_repair_stats.setdefault(
+                failure_type, RepairOutcomeStats()
+            )
+            stats.attempts += weight
+            if success:
+                stats.successes += weight
+            stats.last_ts = self._now()
         if self._config.autosave:
             self._storage.save_sync(self._state)
 
@@ -277,6 +325,20 @@ class Memory:
 
     def get_repair_success_stats(self) -> dict[str, RepairStrategyStats]:
         return self._state.repair_stats
+
+    def get_repair_success_rate_by_failure_type(self) -> dict[str, float]:
+        rates: dict[str, float] = {}
+        for failure_type, stats in self._state.failure_type_repair_stats.items():
+            _, _, rate = self._decayed_outcomes(stats)
+            rates[failure_type] = rate
+        return rates
+
+    def get_repair_success_rate_by_model(self) -> dict[str, float]:
+        rates: dict[str, float] = {}
+        for model, stats in self._state.model_repair_stats.items():
+            _, _, rate = self._decayed_outcomes(stats)
+            rates[model] = rate
+        return rates
 
     def get_model_weakness_summary(self, model: str, top_k: int = 3) -> list[str]:
         stats = self._state.model_stats.get(model)

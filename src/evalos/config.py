@@ -26,3 +26,11 @@ class PipelineConfig(BaseModel):
     strict_mode: bool = False
     generation_model: str | None = None
     repair_model: str | None = None
+    max_edit_distance_ratio: float | None = None
+    repair_budget: int = 100
+    oscillation_window: int = 5
+    oscillation_threshold: float = 0.55
+    evaluator_disagreement_threshold: float = 0.08
+    ensemble_enabled: bool = True
+    min_criterion_confidence: float = 0.35
+    min_repair_improvement: float = 0.005
