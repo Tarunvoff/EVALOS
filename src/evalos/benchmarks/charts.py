@@ -2,13 +2,25 @@ from __future__ import annotations
 
 from collections import defaultdict
 from pathlib import Path
-
-import matplotlib.pyplot as plt
+from typing import Any
 
 from evalos.benchmarks.models import BenchmarkRun, StrategyRun
 
 
+def _get_pyplot() -> Any:
+    try:
+        import matplotlib.pyplot as plt
+
+        return plt
+    except ImportError as exc:
+        raise ImportError(
+            "The 'matplotlib' package is required to render benchmark charts. "
+            "Install it with: pip install 'evalos[bench]'"
+        ) from exc
+
+
 def render_charts(output_dir: Path, run: BenchmarkRun) -> None:
+    plt = _get_pyplot()
     charts_dir = output_dir / "charts"
     charts_dir.mkdir(parents=True, exist_ok=True)
 
@@ -16,9 +28,9 @@ def render_charts(output_dir: Path, run: BenchmarkRun) -> None:
     for result in run.results:
         by_strategy[result.strategy].append(result)
 
-    _cost_vs_quality(charts_dir / "cost_vs_quality.png", by_strategy)
-    _hallucination_chart(charts_dir / "hallucination_rates.png", by_strategy)
-    _before_after_quality(charts_dir / "quality_comparison.png", by_strategy)
+    _cost_vs_quality(charts_dir / "cost_vs_quality.png", by_strategy, plt=plt)
+    _hallucination_chart(charts_dir / "hallucination_rates.png", by_strategy, plt=plt)
+    _before_after_quality(charts_dir / "quality_comparison.png", by_strategy, plt=plt)
 
 
 def _avg(items: list[StrategyRun], field: str) -> float:
@@ -28,7 +40,7 @@ def _avg(items: list[StrategyRun], field: str) -> float:
     return sum(values) / len(values)
 
 
-def _cost_vs_quality(path: Path, grouped: dict[str, list[StrategyRun]]) -> None:
+def _cost_vs_quality(path: Path, grouped: dict[str, list[StrategyRun]], *, plt: Any) -> None:
     labels = []
     tokens = []
     quality = []
@@ -49,7 +61,7 @@ def _cost_vs_quality(path: Path, grouped: dict[str, list[StrategyRun]]) -> None:
     plt.close()
 
 
-def _hallucination_chart(path: Path, grouped: dict[str, list[StrategyRun]]) -> None:
+def _hallucination_chart(path: Path, grouped: dict[str, list[StrategyRun]], *, plt: Any) -> None:
     labels = list(grouped.keys())
     values = [_avg(items, "hallucination_rate") for items in grouped.values()]
     plt.figure(figsize=(6, 4))
@@ -61,7 +73,7 @@ def _hallucination_chart(path: Path, grouped: dict[str, list[StrategyRun]]) -> N
     plt.close()
 
 
-def _before_after_quality(path: Path, grouped: dict[str, list[StrategyRun]]) -> None:
+def _before_after_quality(path: Path, grouped: dict[str, list[StrategyRun]], *, plt: Any) -> None:
     vanilla = grouped.get("vanilla", [])
     evalos = grouped.get("evalos", [])
     labels = ["vanilla", "evalos"]
